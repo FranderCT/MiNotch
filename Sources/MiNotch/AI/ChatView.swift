@@ -7,6 +7,7 @@ struct ChatView: View {
     let topInset: CGFloat
 
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
+    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         VStack(spacing: 10) {
@@ -18,12 +19,20 @@ struct ChatView: View {
             } else {
                 missingKey
             }
+            if let screenText = chat.screenContext {
+                ScreenTextChip(text: screenText, onRemove: chat.discardScreenContext)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             inputBar
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
         .foregroundStyle(.white)
-        .onAppear { chat.refreshBalanceIfNeeded() }
+        .onAppear {
+            chat.refreshBalanceIfNeeded()
+            // Recién capturado: listo para escribir la pregunta.
+            if chat.screenContext != nil { isInputFocused = true }
+        }
     }
 
     // MARK: - Secciones
@@ -146,12 +155,24 @@ struct ChatView: View {
 
     private var inputBar: some View {
         let isEmpty = chat.input.trimmingCharacters(in: .whitespaces).isEmpty
-        let canPress = chat.isStreaming || !isEmpty
+        let hasScreenText = chat.screenContext != nil
+        let canPress = chat.isStreaming || !isEmpty || hasScreenText
 
         return HStack(spacing: 8) {
-            TextField("Preguntale a DeepSeek…", text: $chat.input)
+            Button(action: chat.captureScreen) {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            .buttonStyle(.plain)
+            .disabled(!chat.hasAPIKey || chat.isStreaming || chat.isCapturing)
+            .help("Preguntar sobre la pantalla: elegí una zona y extraigo su texto")
+            .accessibilityLabel("Preguntar sobre la pantalla")
+
+            TextField(hasScreenText ? "¿Qué querés saber? (Enter = explicar)" : "Preguntale a DeepSeek…", text: $chat.input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
+                .focused($isInputFocused)
                 .onSubmit { chat.send() }
                 .disabled(!chat.hasAPIKey)
 
@@ -167,7 +188,7 @@ struct ChatView: View {
             .disabled(!canPress)
             .opacity(canPress ? 1 : 0.35)
         }
-        .padding(.leading, 14)
+        .padding(.leading, 10)
         .padding(.trailing, 5)
         .padding(.vertical, 5)
         .background(.white.opacity(0.06), in: Capsule())
@@ -186,12 +207,17 @@ private struct MessageRow: View {
     var body: some View {
         switch message.role {
         case .user:
-            Text(message.text)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(AITheme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .frame(maxWidth: 340, alignment: .trailing)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+            VStack(alignment: .trailing, spacing: 4) {
+                if let screenText = message.screenText {
+                    ScreenTextChip(text: screenText)
+                }
+                Text(message.text)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(AITheme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .frame(maxWidth: 340, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         case .assistant:
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "sparkles")
@@ -227,6 +253,40 @@ private struct MessageRow: View {
     private static func markdown(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+    }
+}
+
+/// Texto de pantalla adjunto a una pregunta: muestra el comienzo y el tooltip, un fragmento más largo.
+private struct ScreenTextChip: View {
+    let text: String
+    /// Solo en el chip pendiente de enviar: quita el texto adjunto.
+    var onRemove: (() -> Void)?
+
+    private var preview: String {
+        text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "text.viewfinder")
+                .foregroundStyle(AITheme.accent)
+            Text("“\(preview)”")
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Quitar texto de pantalla")
+            }
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.white.opacity(0.75))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(.white.opacity(0.08), in: Capsule())
+        .help("Texto de pantalla (\(text.count) caracteres):\n\(text.prefix(600))")
     }
 }
 

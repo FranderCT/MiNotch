@@ -65,7 +65,7 @@ struct DeepSeekClient: Sendable {
 
     private func makeRequest(_ history: [ChatMessage]) throws -> URLRequest {
         let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt)]
-            + history.map { RequestBody.Message(role: $0.role.rawValue, content: $0.text) }
+            + history.map { RequestBody.Message(role: $0.role.rawValue, content: $0.apiContent) }
 
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"

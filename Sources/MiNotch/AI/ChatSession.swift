@@ -10,6 +10,21 @@ struct ChatMessage: Identifiable, Sendable {
     var text: String
     var usage: ConsultationUsage?
     var isComplete = false
+    /// Texto extraído de la pantalla que acompaña a la pregunta.
+    var screenText: String?
+
+    /// Lo que recibe DeepSeek: la pregunta y, si hay, el texto de la pantalla.
+    var apiContent: String {
+        guard let screenText else { return text }
+        return """
+            Texto capturado de mi pantalla (extraído con OCR, puede tener errores):
+            \"\"\"
+            \(screenText)
+            \"\"\"
+
+            \(text)
+            """
+    }
 }
 
 /// Conversación compartida por todas las píldoras. Vive mientras la app está abierta.
@@ -20,6 +35,9 @@ final class ChatSession: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var hasAPIKey = false
+    /// Texto capturado de la pantalla, pendiente de enviarse con la próxima pregunta.
+    @Published private(set) var screenContext: String?
+    @Published private(set) var isCapturing = false
 
     @Published private(set) var balance: DeepSeekBalance?
     @Published private(set) var balanceError: String?
@@ -31,6 +49,10 @@ final class ChatSession: ObservableObject {
 
     /// Lo define AppDelegate: abre la ventana de configuración.
     var onOpenSettings: (() -> Void)?
+    /// Los define AppDelegate: esconden las píldoras mientras se elige la zona y las vuelven a mostrar
+    /// (con el chat abierto si hay algo que ver).
+    var onCaptureStart: (() -> Void)?
+    var onCaptureEnd: ((_ showChat: Bool) -> Void)?
 
     /// Copia en memoria de la key: se lee al consultar saldo o enviar un mensaje.
     private var apiKey: String?
@@ -114,15 +136,52 @@ final class ChatSession: ObservableObject {
         }
     }
 
+    // MARK: - Pantalla
+
+    func captureScreen() {
+        guard hasAPIKey else {
+            openSettings()
+            return
+        }
+        guard !isCapturing, !isStreaming else { return }
+        isCapturing = true
+        onCaptureStart?()
+
+        Task {
+            var showChat = true
+            do {
+                if let text = try await ScreenTextCapture.captureText() {
+                    screenContext = text
+                    errorMessage = nil
+                } else {
+                    showChat = false
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isCapturing = false
+            onCaptureEnd?(showChat)
+        }
+    }
+
+    func discardScreenContext() {
+        screenContext = nil
+    }
+
     // MARK: - Chat
 
     func send() {
-        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let screenText = screenContext
+        if text.isEmpty, screenText != nil {
+            text = "Explicame este texto."
+        }
         guard !text.isEmpty, !isStreaming, hasAPIKey else { return }
 
         input = ""
+        screenContext = nil
         errorMessage = nil
-        messages.append(ChatMessage(role: .user, text: text))
+        messages.append(ChatMessage(role: .user, text: text, screenText: screenText))
         let history = messages
         messages.append(ChatMessage(role: .assistant, text: ""))
         let replyID = messages.last!.id
