@@ -10,6 +10,7 @@ struct ChatView: View {
     @ObservedObject var account: DeepSeekAccount
     @ObservedObject var workspace: Workspace
     @ObservedObject var terminals: TerminalSessions
+    @ObservedObject var agents: ExternalAgents
     /// Alto de la franja superior (barra de menú o notch físico); ahí va el encabezado.
     let topInset: CGFloat
 
@@ -251,6 +252,9 @@ struct ChatView: View {
             if !terminals.sessions.isEmpty {
                 terminalsMenu
             }
+            if !agents.jobs.isEmpty {
+                agentsMenu
+            }
             approvalModeMenu
             Spacer(minLength: 0)
             balance
@@ -296,6 +300,44 @@ struct ChatView: View {
         .help(account.approvalMode == .auto
               ? "Automático: escribe archivos y ejecuta comandos sin preguntar. Los comandos peligrosos (rm -rf, sudo, git push --force…) se preguntan igual."
               : "Preguntar: cada vez que quiera escribir, ejecutar o cambiar de carpeta, te pide aprobación.")
+    }
+
+    /// Trabajos de agentes externos (Claude Code, Codex…): estado, copiar la respuesta o detenerlos.
+    private var agentsMenu: some View {
+        let running = agents.jobs.filter(\.isRunning).count
+        return Menu {
+            ForEach(agents.jobs, id: \.id) { job in
+                Menu("\(job.id) · \(job.kind.displayName) · \(Self.statusText(job))") {
+                    Text(job.task.prefix(80))
+                    if job.isRunning {
+                        Button("Detener", action: job.stop)
+                    } else if let result = job.result {
+                        Button("Copiar respuesta") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(result, forType: .string)
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Quitar los terminados", action: agents.clearFinished)
+                .disabled(running == agents.jobs.count)
+        } label: {
+            Label(running > 0 ? "\(running)" : "\(agents.jobs.count)", systemImage: running > 0 ? "cpu.fill" : "cpu")
+                .foregroundStyle(running > 0 ? AnyShapeStyle(AITheme.cyan) : AnyShapeStyle(.white.opacity(0.65)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Agentes externos: \(running) trabajando de \(agents.jobs.count)")
+    }
+
+    private static func statusText(_ job: ExternalAgentJob) -> String {
+        switch job.status {
+        case .running: "trabajando desde las \(job.startedAt.formatted(date: .omitted, time: .shortened))"
+        case .finished: "terminó"
+        case .failed: "falló"
+        case .stopped: "detenido"
+        }
     }
 
     /// Sesiones de terminal abiertas por el asistente; desde acá se pueden cerrar.

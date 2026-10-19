@@ -65,6 +65,7 @@ struct NotchView: View {
                     let chat = tabs.selected
                     ChatView(
                         tabs: tabs, chat: chat, account: tabs.account, workspace: chat.workspace, terminals: chat.terminals,
+                        agents: chat.externalAgents,
                         topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted
                     )
                     // Cada pestaña con su foco y su scroll.

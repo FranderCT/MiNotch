@@ -75,6 +75,11 @@ enum AgentTool: String, CaseIterable, Sendable {
     case tabSend = "tab_send"
     case tabRead = "tab_read"
     case tabClose = "tab_close"
+    case agentStart = "agent_start"
+    case agentRead = "agent_read"
+    case agentSend = "agent_send"
+    case agentList = "agent_list"
+    case agentStop = "agent_stop"
 
     private static let readLimit = 60_000
     private static let listLimit = 300
@@ -100,7 +105,17 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .tabSend: "arrow.up.right.square"
         case .tabRead: "arrow.down.left.square"
         case .tabClose: "xmark.rectangle"
+        case .agentStart: "cpu"
+        case .agentRead: "tray.and.arrow.down"
+        case .agentSend: "arrow.uturn.right"
+        case .agentList: "list.bullet"
+        case .agentStop: "stop.circle"
         }
+    }
+
+    /// Dirigen agentes externos (Claude Code, Codex…): las ejecuta ChatSession.
+    var isExternalAgent: Bool {
+        [.agentStart, .agentRead, .agentSend, .agentList, .agentStop].contains(self)
     }
 
     /// Coordinan otras pestañas: las ejecuta ChatSession, que conoce ChatTabs. No piden aprobación
@@ -134,6 +149,11 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .tabSend: "→ pestaña \(args["tab"] ?? "?"): \(args["message"] ?? "")"
         case .tabRead: "← pestaña \(args["tab"] ?? "?")"
         case .tabClose: "Cerrar pestaña \(args["tab"] ?? "?")"
+        case .agentStart: "\(ExternalAgentKind(rawValue: args["agent"] ?? "")?.displayName ?? args["agent"] ?? "?"): \(args["task"] ?? "")"
+        case .agentRead: "← trabajo \(args["job"] ?? "?")"
+        case .agentSend: "→ trabajo \(args["job"] ?? "?"): \(args["message"] ?? "")"
+        case .agentList: "Ver agentes externos"
+        case .agentStop: "Detener trabajo \(args["job"] ?? "?")"
         }
     }
 
@@ -279,6 +299,48 @@ enum AgentTool: String, CaseIterable, Sendable {
             properties: ["tab": "Número de pestaña."],
             required: ["tab"]
         ),
+        ToolDefinition(
+            name: agentStart.rawValue,
+            description: "Lanza en segundo plano un agente de programación externo (su CLI sin interfaz) con una tarea, en una carpeta. Vuelve enseguida con un número de trabajo: usá agent_read para el resultado. Se pueden lanzar varios en paralelo. Agentes: claude (Claude Code), codex (Codex), cursor (Cursor Agent), grok (Grok), opencode (OpenCode). Con access edit o full el usuario debe aprobarlo.",
+            properties: [
+                "agent": "claude, codex, cursor, grok u opencode.",
+                "task": "La tarea completa y autocontenida: el agente no ve esta conversación. Incluí contexto, archivos relevantes y qué tiene que responder al terminar.",
+                "access": "read (solo leer y planear, por defecto), edit (editar archivos de la carpeta) o full (también ejecutar comandos sin preguntar).",
+                "directory": "Carpeta donde trabaja; por defecto la de esta pestaña.",
+                "model": "Opcional: modelo del agente (por ejemplo sonnet o haiku para Claude, que por defecto usa uno caro).",
+            ],
+            required: ["agent", "task"]
+        ),
+        ToolDefinition(
+            name: agentRead.rawValue,
+            description: "Espera a que un trabajo de un agente externo termine (o se acabe el tiempo) y devuelve su respuesta, duración y costo.",
+            properties: [
+                "job": "Número de trabajo.",
+                "wait_seconds": "Máximo a esperar (por defecto 300, hasta 1800).",
+            ],
+            required: ["job"]
+        ),
+        ToolDefinition(
+            name: agentSend.rawValue,
+            description: "Sigue la misma sesión de un agente externo que ya terminó, con un mensaje nuevo (por ejemplo: \"ahora agregá tests a eso\"). Vuelve enseguida: usá agent_read.",
+            properties: [
+                "job": "Número de trabajo.",
+                "message": "El mensaje para el agente.",
+            ],
+            required: ["job", "message"]
+        ),
+        ToolDefinition(
+            name: agentList.rawValue,
+            description: "Lista los agentes externos instalados y los trabajos de esta pestaña con su estado.",
+            properties: [:],
+            required: []
+        ),
+        ToolDefinition(
+            name: agentStop.rawValue,
+            description: "Detiene un trabajo de un agente externo.",
+            properties: ["job": "Número de trabajo."],
+            required: ["job"]
+        ),
     ]
 
     // MARK: - Aprobación
@@ -288,7 +350,10 @@ enum AgentTool: String, CaseIterable, Sendable {
         let path = args["path"] ?? ""
         switch self {
         case .listDirectory, .readFile, .searchFiles, .terminalRead, .terminalClose,
-             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose:
+             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose, .agentRead, .agentList, .agentStop:
+            return nil
+        case .agentStart, .agentSend:
+            // agent_send lo resuelve ChatSession (necesita el trabajo para saber su acceso).
             return nil
         case .writeFile:
             let exists = Self.resolve(path, in: root).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
@@ -425,7 +490,8 @@ enum AgentTool: String, CaseIterable, Sendable {
             return ToolOutcome(text: "Archivo editado.")
 
         case .runCommand, .changeDirectory, .terminalStart, .terminalSend, .terminalRead, .terminalClose,
-             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose:
+             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose,
+             .agentStart, .agentRead, .agentSend, .agentList, .agentStop:
             throw ToolError("Se ejecuta en otro lado.")
         }
     }
@@ -505,7 +571,7 @@ struct ToolError: LocalizedError {
 }
 
 /// Salida de un comando, escrita desde el hilo del pipe y leída al terminar.
-private final class OutputBuffer: @unchecked Sendable {
+final class OutputBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
 

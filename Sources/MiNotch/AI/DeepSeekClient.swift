@@ -33,6 +33,12 @@ struct DeepSeekClient: Sendable {
         después juntá los resultados con tab_read. Si una pestaña queda esperando al usuario, avisale que la revise.
         - Si el mensaje dice que es una tarea de otra pestaña, hacela y terminá con una respuesta concisa con el \
         resultado: es lo que recibe esa pestaña.
+        - Podés delegar en agentes de programación externos con agent_start (claude, codex, cursor, grok, \
+        opencode): conviene para tareas de código grandes, segundas opiniones o trabajo en paralelo. No ven esta \
+        conversación: la tarea tiene que ser autocontenida. Usá access read salvo que haga falta editar. Después \
+        juntá el resultado con agent_read y, para seguir con el mismo agente, agent_send. Claude Code por \
+        defecto usa un modelo caro (unos 0,20 USD aun para algo mínimo): para tareas simples pasá model "sonnet" \
+        o "haiku". Revisá lo que hicieron antes de dar la tarea por terminada.
         - No ejecutes comandos destructivos (rm -rf, git reset --hard, git push --force…) salvo que el usuario \
         lo pida explícitamente. No arranques servidores ni procesos que no terminan: decile al usuario cómo \
         correrlos él.

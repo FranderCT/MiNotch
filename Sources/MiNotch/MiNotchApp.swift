@@ -31,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         setupMainMenu()
         handleTerminationSignal()
+        // Qué agentes externos (Claude Code, Codex…) hay instalados, para agent_start.
+        Task { await ExternalAgentKind.detectInstalled() }
         account.onOpenSettings = { [weak self] in self?.openSettings() }
 
         screenManager.onScreensChange = { [weak self] screens in

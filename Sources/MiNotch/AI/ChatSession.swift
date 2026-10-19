@@ -61,6 +61,8 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var mode: TabMode = .agent
     /// Terminal visible de la pestaña, compartida con el asistente (sesión 0).
     let shell = TabShell()
+    /// Trabajos de agentes externos (Claude Code, Codex…) lanzados desde esta pestaña.
+    let externalAgents = ExternalAgents()
     @Published private(set) var messages: [ChatMessage] = []
     @Published var input = ""
     @Published private(set) var isStreaming = false
@@ -122,6 +124,7 @@ final class ChatSession: ObservableObject, Identifiable {
         stop()
         terminals.closeAll()
         shell.terminate()
+        externalAgents.stopAll()
     }
 
     /// Nombre para mostrar: el título o, si no tiene, la carpeta.
@@ -295,6 +298,8 @@ final class ChatSession: ObservableObject, Identifiable {
                 outcome = await runTerminalTool(tool, args)
             } else if tool.isTab {
                 outcome = await runTabTool(tool, args)
+            } else if tool.isExternalAgent {
+                outcome = await runExternalAgentTool(tool, args)
             } else {
                 outcome = await tool.execute(args, in: workspace.directory)
             }
@@ -396,6 +401,90 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         let error = target.errorMessage.map { "\nError: \($0)" } ?? ""
         return ToolOutcome(text: "Pestaña \(target.number) terminó.\n\(reply)\(error)", failed: target.errorMessage != nil)
+    }
+
+    // MARK: - Agentes externos
+
+    private func runExternalAgentTool(_ tool: AgentTool, _ args: [String: String]) async -> ToolOutcome {
+        switch tool {
+        case .agentList:
+            let installed = ExternalAgentKind.installed.map { "\($0.rawValue) (\($0.displayName))" }
+            var lines = ["Instalados: \(installed.isEmpty ? "ninguno" : installed.joined(separator: ", "))."]
+            lines += externalAgents.jobs.map { job in
+                let state = switch job.status {
+                case .running: "trabajando"
+                case .finished: "terminó"
+                case .failed: "falló"
+                case .stopped: "detenido"
+                }
+                return "Trabajo \(job.id) · \(job.kind.displayName) · \(job.access.title) · \(state) · \(job.task.prefix(120))"
+            }
+            return ToolOutcome(text: lines.joined(separator: "\n"))
+
+        case .agentStart:
+            guard let kind = ExternalAgentKind(rawValue: (args["agent"] ?? "").lowercased()) else {
+                return ToolOutcome(text: "Agente desconocido: \(args["agent"] ?? ""). Opciones: \(ExternalAgentKind.allCases.map(\.rawValue).joined(separator: ", ")).", failed: true)
+            }
+            guard kind.path != nil else {
+                return ToolOutcome(text: "\(kind.displayName) no está instalado (no se encontró \(kind.executable)).", failed: true)
+            }
+            let access = AgentAccess(rawValue: (args["access"] ?? "read").lowercased()) ?? .read
+            let directory = args["directory"].map { AgentTool.directoryURL($0, from: workspace.directory) } ?? workspace.directory
+            guard Workspace.isDirectory(directory) else {
+                return ToolOutcome(text: "No existe la carpeta \(directory.path).", failed: true)
+            }
+            let task = args["task"] ?? ""
+            guard await approveExternalAgent(kind, access: access, directory: directory, message: task) else {
+                return ToolOutcome(text: "El usuario rechazó lanzar \(kind.displayName).", failed: true)
+            }
+            do {
+                let model = args["model"].flatMap { $0.isEmpty ? nil : $0 }
+                let job = try externalAgents.start(kind, task: task, directory: directory, access: access, model: model)
+                return ToolOutcome(text: "Trabajo \(job.id) lanzado: \(kind.displayName) (\(access.title)) en \(directory.path). Usá agent_read para el resultado.")
+            } catch {
+                return ToolOutcome(text: error.localizedDescription, failed: true)
+            }
+
+        default:
+            guard let job = Int(args["job"] ?? "").flatMap(externalAgents.job) else {
+                return ToolOutcome(text: "No existe el trabajo \(args["job"] ?? ""). Usá agent_list.", failed: true)
+            }
+            switch tool {
+            case .agentSend:
+                guard !job.isRunning else {
+                    return ToolOutcome(text: "El trabajo \(job.id) sigue trabajando: esperá con agent_read.", failed: true)
+                }
+                let message = args["message"] ?? ""
+                guard await approveExternalAgent(job.kind, access: job.access, directory: job.directory, message: message) else {
+                    return ToolOutcome(text: "El usuario rechazó el mensaje para \(job.kind.displayName).", failed: true)
+                }
+                job.run(message)
+                return ToolOutcome(text: "Mensaje enviado al trabajo \(job.id) (\(job.kind.displayName)). Usá agent_read para la respuesta.")
+            case .agentStop:
+                job.stop()
+                return ToolOutcome(text: "Trabajo \(job.id) detenido.")
+            default:
+                let wait = min(max(Double(args["wait_seconds"] ?? "") ?? 300, 1), 1800)
+                let start = Date()
+                while job.isRunning, !Task.isCancelled, Date().timeIntervalSince(start) < wait {
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                return ToolOutcome(text: job.report, failed: job.status == .failed)
+            }
+        }
+    }
+
+    /// Solo lectura no pregunta; editar, según el modo; acceso total, siempre.
+    private func approveExternalAgent(_ kind: ExternalAgentKind, access: AgentAccess, directory: URL, message: String) async -> Bool {
+        guard access != .read else { return true }
+        let approval = ToolApproval(
+            icon: AgentTool.agentStart.icon,
+            title: "\(kind.displayName) · \(access.title) · \(directory.lastPathComponent)",
+            detail: "Carpeta: \((directory.path as NSString).abbreviatingWithTildeInPath)\n\n\(message.prefix(3000))",
+            riskReason: access == .full ? "el agente ejecuta comandos sin preguntar" : nil
+        )
+        guard account.approvalMode == .ask || approval.riskReason != nil else { return true }
+        return await requestApproval(approval)
     }
 
     // MARK: - Terminal
