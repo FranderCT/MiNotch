@@ -54,6 +54,8 @@ struct GlowBorder<S: Shape>: View {
                 shape.stroke(ring, lineWidth: lineWidth)
             }
             .padding(glowPadding)
+            // Por GPU: el degradado cónico dibujado por CPU, píxel por píxel, costaba ~23 % al girar (~8 % así).
+            .drawingGroup()
         }
         // Se desvanece hacia arriba: el borde superior está pegado al borde de la pantalla.
         .mask(

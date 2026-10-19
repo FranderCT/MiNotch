@@ -68,6 +68,22 @@ final class ChatSession: ObservableObject {
     /// Acción del asistente esperando que el usuario la apruebe o rechace.
     @Published private(set) var pendingApproval: ToolApproval?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
+    /// Preguntar antes de cada acción o hacerlo todo solo (salvo lo peligroso). Se recuerda entre reinicios.
+    @Published var approvalMode = ApprovalMode(rawValue: UserDefaults.standard.string(forKey: ApprovalMode.defaultsKey) ?? "") ?? .ask {
+        didSet {
+            UserDefaults.standard.set(approvalMode.rawValue, forKey: ApprovalMode.defaultsKey)
+            // Lo que estaba esperando también se aprueba, si no es peligroso.
+            if approvalMode == .auto, let pending = pendingApproval, pending.riskReason == nil {
+                resolveApproval(true)
+            }
+        }
+    }
+    /// Sesiones de terminal interactivas (ssh, sudo…) abiertas por el asistente.
+    let terminals = TerminalSessions()
+    /// Una sesión pide contraseña: la escribe el usuario y va directo a la terminal, nunca a DeepSeek.
+    @Published private(set) var pendingSecret: SecretRequest?
+    @Published var secretInput = ""
+    private var secretContinuation: CheckedContinuation<String?, Never>?
     /// Tope de pasos con herramientas por mensaje, por si el modelo entra en un bucle.
     private static let maxSteps = 25
 
@@ -285,11 +301,15 @@ final class ChatSession: ObservableObject {
         let outcome: ToolOutcome
 
         if let tool, let args {
-            if let approval = tool.approval(for: args, in: workspace.directory), !(await requestApproval(approval)) {
+            if let approval = tool.approval(for: args, in: workspace.directory),
+               approvalMode == .ask || approval.riskReason != nil,
+               !(await requestApproval(approval)) {
                 outcome = ToolOutcome(text: "El usuario rechazó esta acción.", failed: true)
                 summary += " — rechazado"
             } else if tool == .changeDirectory {
                 outcome = changeDirectory(to: args["path"] ?? "")
+            } else if tool.isTerminal {
+                outcome = await runTerminalTool(tool, args)
             } else {
                 outcome = await tool.execute(args, in: workspace.directory)
             }
@@ -313,6 +333,78 @@ final class ChatSession: ObservableObject {
         return ToolOutcome(text: "Carpeta de trabajo: \(workspace.directory.path)")
     }
 
+    // MARK: - Terminal
+
+    private func runTerminalTool(_ tool: AgentTool, _ args: [String: String]) async -> ToolOutcome {
+        let wait = min(max(Double(args["wait_seconds"] ?? "") ?? 15, 1), 120)
+        if tool == .terminalStart {
+            do {
+                let session = try terminals.start(args["command"] ?? "", in: workspace.directory)
+                let output = await collectOutput(of: session, maxWait: wait)
+                return ToolOutcome(text: "Sesión \(session.id) abierta (\(session.command)).\n\(output)")
+            } catch {
+                return ToolOutcome(text: "No se pudo abrir la sesión: \(error.localizedDescription)", failed: true)
+            }
+        }
+
+        guard let id = Int(args["session"] ?? ""), let session = terminals.session(id) else {
+            let open = terminals.sessions.map { "\($0.id) (\($0.command))" }.joined(separator: ", ")
+            return ToolOutcome(text: "No existe la sesión \(args["session"] ?? ""). Abiertas: \(open.isEmpty ? "ninguna" : open).", failed: true)
+        }
+        switch tool {
+        case .terminalSend:
+            guard session.isRunning else {
+                return ToolOutcome(text: "La sesión \(id) ya terminó (código \(session.exitStatus)).", failed: true)
+            }
+            let enter = args["enter"]?.lowercased() != "false"
+            session.write((args["input"] ?? "") + (enter ? "\r" : ""))
+            return ToolOutcome(text: await collectOutput(of: session, maxWait: wait))
+        case .terminalClose:
+            terminals.close(id)
+            return ToolOutcome(text: "Sesión \(id) cerrada.")
+        default:
+            return ToolOutcome(text: await collectOutput(of: session, maxWait: wait))
+        }
+    }
+
+    /// Lee la salida nueva y, si termina pidiendo una contraseña, se la pide al usuario (no al modelo).
+    private func collectOutput(of session: TerminalSession, maxWait: TimeInterval) async -> String {
+        var transcript = await session.readNew(maxWait: maxWait)
+        // Hasta 3 intentos: ssh y sudo vuelven a pedirla si está mal.
+        for _ in 0..<3 {
+            guard session.isRunning, let prompt = TerminalSession.secretPrompt(in: transcript) else { break }
+            guard let secret = await requestSecret(SecretRequest(sessionID: session.id, command: session.command, prompt: prompt)) else {
+                transcript += "\n[El usuario no ingresó la contraseña. La sesión sigue esperándola: cerrala o mandá Ctrl+C.]"
+                break
+            }
+            session.write(secret + "\r")
+            // La terminal no la muestra, pero por las dudas nunca llega al modelo.
+            let next = await session.readNew(maxWait: maxWait).replacingOccurrences(of: secret, with: "••••")
+            transcript += "\n[el usuario ingresó la contraseña]\n" + next
+        }
+        if !session.isRunning {
+            transcript += "\n[La sesión terminó con código \(session.exitStatus)]"
+        }
+        return transcript.isEmpty ? "(sin salida nueva)" : transcript
+    }
+
+    func submitSecret(_ send: Bool) {
+        let secret = send ? secretInput : nil
+        secretInput = ""
+        pendingSecret = nil
+        secretContinuation?.resume(returning: secret)
+        secretContinuation = nil
+    }
+
+    private func requestSecret(_ request: SecretRequest) async -> String? {
+        guard !Task.isCancelled else { return nil }
+        return await withCheckedContinuation { continuation in
+            secretContinuation = continuation
+            secretInput = ""
+            pendingSecret = request
+        }
+    }
+
     // MARK: - Aprobación
 
     func resolveApproval(_ approved: Bool) {
@@ -331,13 +423,16 @@ final class ChatSession: ObservableObject {
 
     func stop() {
         streamTask?.cancel()
-        // Una aprobación pendiente cuenta como rechazada: así la respuesta termina enseguida.
+        // Una aprobación o contraseña pendiente cuenta como rechazada: así la respuesta termina enseguida.
         resolveApproval(false)
+        submitSecret(false)
     }
 
     func clear() {
         stop()
         conversationID = UUID()
+        // El asistente nuevo no sabría que existen.
+        terminals.closeAll()
         messages.removeAll()
         errorMessage = nil
     }
@@ -363,4 +458,12 @@ final class ChatSession: ObservableObject {
             messages[last].isComplete = true
         }
     }
+}
+
+/// Pedido de contraseña de una sesión de terminal.
+struct SecretRequest: Sendable {
+    let sessionID: Int
+    let command: String
+    /// La línea de la terminal, por ejemplo "usuario@servidor's password:".
+    let prompt: String
 }

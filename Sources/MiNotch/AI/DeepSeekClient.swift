@@ -18,6 +18,11 @@ struct DeepSeekClient: Sendable {
         cada acción. Si rechaza una, no insistas: preguntá cómo seguir.
         - Antes de editar un archivo, leelo. Para cambios puntuales usá edit_file; write_file para archivos \
         nuevos o reescrituras completas.
+        - Para comandos locales que terminan solos usá run_command. Para ssh y todo lo interactivo (sudo, \
+        REPLs, programas que preguntan algo) usá las sesiones de terminal: terminal_start, terminal_send, \
+        terminal_read y terminal_close. Si aparece un pedido de contraseña o passphrase, el usuario la escribe \
+        en un campo seguro que vos no ves: nunca se la pidas en el chat. Evitá paginadores y pantallas completas \
+        (usá --no-pager, | cat, top -l 1 o top -bn1 en vez de top, etc.).
         - No ejecutes comandos destructivos (rm -rf, git reset --hard, git push --force…) salvo que el usuario \
         lo pida explícitamente. No arranques servidores ni procesos que no terminan: decile al usuario cómo \
         correrlos él.

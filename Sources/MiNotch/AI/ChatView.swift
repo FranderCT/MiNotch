@@ -6,11 +6,13 @@ import UniformTypeIdentifiers
 struct ChatView: View {
     @ObservedObject var chat: ChatSession
     @ObservedObject var workspace: Workspace
+    @ObservedObject var terminals: TerminalSessions
     /// Alto de la franja superior (barra de menú o notch físico); ahí va el encabezado.
     let topInset: CGFloat
 
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
     @FocusState private var isInputFocused: Bool
+    @FocusState private var isSecretFocused: Bool
     /// Una imagen arrastrada está sobre el notch. Vive en NotchState: las Command Line Tools no incluyen la macro `@State`.
     @Binding var isDropTargeted: Bool
 
@@ -26,6 +28,9 @@ struct ChatView: View {
             }
             if let approval = chat.pendingApproval {
                 ApprovalCard(approval: approval, onDecide: chat.resolveApproval)
+            }
+            if let request = chat.pendingSecret {
+                secretCard(request)
             }
             if chat.isReadingImage {
                 ReadingImageChip()
@@ -46,6 +51,9 @@ struct ChatView: View {
         }
         .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: attachDroppedImage)
         .onAppear { chat.refreshBalanceIfNeeded() }
+        .onChange(of: chat.pendingSecret?.prompt) {
+            if chat.pendingSecret != nil { isSecretFocused = true }
+        }
         .onChange(of: chat.isReadingImage) {
             // Recién adjuntada: listo para escribir la pregunta.
             if chat.isReadingImage { isInputFocused = true }
@@ -161,6 +169,10 @@ struct ChatView: View {
     private var statusBar: some View {
         HStack(spacing: 10) {
             directoryMenu
+            if !terminals.sessions.isEmpty {
+                terminalsMenu
+            }
+            approvalModeMenu
             Spacer(minLength: 0)
             balance
         }
@@ -186,6 +198,90 @@ struct ChatView: View {
         // Cambiar de carpeta a mitad de una respuesta confundiría al asistente.
         .disabled(chat.isStreaming)
         .help("Carpeta de trabajo del asistente: \(workspace.displayPath)")
+    }
+
+    private var approvalModeMenu: some View {
+        Menu {
+            Picker("Aprobación", selection: $chat.approvalMode) {
+                ForEach(ApprovalMode.allCases, id: \.self) { mode in
+                    Label(mode.title, systemImage: mode.icon).tag(mode)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Label(chat.approvalMode.title, systemImage: chat.approvalMode.icon)
+                .foregroundStyle(chat.approvalMode == .auto ? AITheme.pink : .white.opacity(0.65))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(chat.approvalMode == .auto
+              ? "Automático: escribe archivos y ejecuta comandos sin preguntar. Los comandos peligrosos (rm -rf, sudo, git push --force…) se preguntan igual."
+              : "Preguntar: cada vez que quiera escribir, ejecutar o cambiar de carpeta, te pide aprobación.")
+    }
+
+    /// Sesiones de terminal abiertas por el asistente; desde acá se pueden cerrar.
+    private var terminalsMenu: some View {
+        Menu {
+            ForEach(terminals.sessions, id: \.id) { session in
+                Button("Cerrar \(session.id): \(session.command)\(session.isRunning ? "" : " (terminó)")") {
+                    terminals.close(session.id)
+                }
+            }
+            Divider()
+            Button("Cerrar todas", action: terminals.closeAll)
+        } label: {
+            Label("\(terminals.sessions.count)", systemImage: "apple.terminal")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(terminals.sessions.map { "\($0.id): \($0.command)" }.joined(separator: "\n"))
+    }
+
+    /// Pedido de contraseña de una sesión: la escribe el usuario y va directo a la terminal.
+    private func secretCard(_ request: SecretRequest) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .foregroundStyle(AITheme.accent)
+                Text("Sesión \(request.sessionID): \(request.prompt)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(request.command)
+            }
+            HStack(spacing: 8) {
+                SecureField("Contraseña", text: $chat.secretInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($isSecretFocused)
+                    .onSubmit { chat.submitSecret(true) }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                Button("Cancelar") { chat.submitSecret(false) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                Button { chat.submitSecret(true) } label: {
+                    Text("Enviar")
+                        .font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                        .background(AITheme.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            Text("Va directo a la terminal: DeepSeek no la ve.")
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .padding(8)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(AITheme.accent, lineWidth: 1)
+                .opacity(0.6)
+        )
     }
 
     private var balance: some View {
@@ -448,6 +544,12 @@ private struct ApprovalCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let reason = approval.riskReason {
+                Label("Parece riesgoso (\(reason)): se pregunta aunque esté en automático.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(AITheme.pink)
+                    .lineLimit(2)
+            }
             HStack(spacing: 6) {
                 Image(systemName: approval.icon)
                     .foregroundStyle(AITheme.accent)

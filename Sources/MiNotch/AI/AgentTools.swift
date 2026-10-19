@@ -28,6 +28,32 @@ struct ToolApproval: Sendable {
     let title: String
     /// Contenido, cambio o comando a revisar.
     let detail: String
+    /// Parece peligroso: se pregunta aunque esté el modo automático. Dice por qué.
+    var riskReason: String?
+}
+
+/// Cuánto pregunta el asistente antes de escribir, ejecutar o cambiar de carpeta.
+enum ApprovalMode: String, CaseIterable, Sendable {
+    /// Cada acción espera aprobación.
+    case ask
+    /// Todo sin preguntar, salvo los comandos que parecen peligrosos.
+    case auto
+
+    static let defaultsKey = "approvalMode"
+
+    var title: String {
+        switch self {
+        case .ask: "Preguntar"
+        case .auto: "Automático"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .ask: "hand.raised"
+        case .auto: "bolt.fill"
+        }
+    }
 }
 
 /// Herramientas del asistente. Las que solo leen se ejecutan solas; las que escriben, ejecutan
@@ -40,6 +66,10 @@ enum AgentTool: String, CaseIterable, Sendable {
     case editFile = "edit_file"
     case runCommand = "run_command"
     case changeDirectory = "change_directory"
+    case terminalStart = "terminal_start"
+    case terminalSend = "terminal_send"
+    case terminalRead = "terminal_read"
+    case terminalClose = "terminal_close"
 
     private static let readLimit = 60_000
     private static let listLimit = 300
@@ -56,7 +86,16 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .editFile: "pencil"
         case .runCommand: "terminal"
         case .changeDirectory: "arrow.right.circle"
+        case .terminalStart: "apple.terminal"
+        case .terminalSend: "keyboard"
+        case .terminalRead: "text.alignleft"
+        case .terminalClose: "xmark.square"
         }
+    }
+
+    /// Las de terminal las ejecuta ChatSession: necesitan las sesiones abiertas y pedir contraseñas.
+    var isTerminal: Bool {
+        [.terminalStart, .terminalSend, .terminalRead, .terminalClose].contains(self)
     }
 
     /// Una línea para el chat: qué hizo (o intentó hacer) el asistente.
@@ -70,7 +109,24 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .editFile: "Editar \(path)"
         case .runCommand: "$ \(args["command"] ?? "")"
         case .changeDirectory: "Ir a \(path)"
+        case .terminalStart: "▶ \(args["command"] ?? "")"
+        case .terminalSend: "[\(args["session"] ?? "?")] \(Self.visibleInput(args["input"] ?? ""))"
+        case .terminalRead: "[\(args["session"] ?? "?")] leer salida"
+        case .terminalClose: "[\(args["session"] ?? "?")] cerrar"
         }
+    }
+
+    /// Caracteres de control legibles: "\u{03}" → "⌃C".
+    static func visibleInput(_ input: String) -> String {
+        input.unicodeScalars.map { scalar in
+            switch scalar.value {
+            case 0x0D, 0x0A: "⏎"
+            case 0x09: "⇥"
+            case 0x1B: "⎋"
+            case 1...26: "⌃" + String(UnicodeScalar(scalar.value + 64)!)
+            default: String(scalar)
+            }
+        }.joined()
     }
 
     // MARK: - Definiciones para la API
@@ -128,6 +184,38 @@ enum AgentTool: String, CaseIterable, Sendable {
             properties: ["path": "Carpeta nueva."],
             required: ["path"]
         ),
+        ToolDefinition(
+            name: terminalStart.rawValue,
+            description: "Abre una sesión de terminal interactiva (con PTY) que queda viva: ssh usuario@host, un REPL, etc. Devuelve el número de sesión y la salida inicial. Si aparece un pedido de contraseña, el usuario la escribe solo: nunca se la pidas. El usuario debe aprobarlo.",
+            properties: ["command": "Comando que abre la sesión, por ejemplo: ssh usuario@servidor."],
+            required: ["command"]
+        ),
+        ToolDefinition(
+            name: terminalSend.rawValue,
+            description: "Escribe en una sesión abierta (por defecto agrega Enter) y devuelve la salida nueva. Para Ctrl+C mandá input \"\\u0003\" con enter \"false\". El usuario debe aprobarlo.",
+            properties: [
+                "session": "Número de sesión.",
+                "input": "Texto a escribir, por ejemplo un comando.",
+                "enter": "\"true\" (por defecto) para apretar Enter al final, \"false\" para no.",
+                "wait_seconds": "Máximo a esperar la salida (por defecto 15, hasta 120).",
+            ],
+            required: ["session", "input"]
+        ),
+        ToolDefinition(
+            name: terminalRead.rawValue,
+            description: "Espera y devuelve la salida nueva de una sesión, para comandos que tardan.",
+            properties: [
+                "session": "Número de sesión.",
+                "wait_seconds": "Máximo a esperar (por defecto 15, hasta 120).",
+            ],
+            required: ["session"]
+        ),
+        ToolDefinition(
+            name: terminalClose.rawValue,
+            description: "Cierra una sesión de terminal.",
+            properties: ["session": "Número de sesión."],
+            required: ["session"]
+        ),
     ]
 
     // MARK: - Aprobación
@@ -136,7 +224,7 @@ enum AgentTool: String, CaseIterable, Sendable {
     func approval(for args: [String: String], in root: URL) -> ToolApproval? {
         let path = args["path"] ?? ""
         switch self {
-        case .listDirectory, .readFile, .searchFiles:
+        case .listDirectory, .readFile, .searchFiles, .terminalRead, .terminalClose:
             return nil
         case .writeFile:
             let exists = Self.resolve(path, in: root).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
@@ -155,11 +243,42 @@ enum AgentTool: String, CaseIterable, Sendable {
                 detail: "− \((args["old_text"] ?? "").prefix(2000))\n\n+ \((args["new_text"] ?? "").prefix(2000))"
             )
         case .runCommand:
-            return ToolApproval(icon: icon, title: "Ejecutar en \(root.lastPathComponent)", detail: args["command"] ?? "")
+            let command = args["command"] ?? ""
+            return ToolApproval(icon: icon, title: "Ejecutar en \(root.lastPathComponent)", detail: command, riskReason: Self.riskReason(command))
         case .changeDirectory:
             let target = Self.directoryURL(path, from: root)
             return ToolApproval(icon: icon, title: "Mover el asistente a otra carpeta", detail: (target.path as NSString).abbreviatingWithTildeInPath)
+        case .terminalStart:
+            let command = args["command"] ?? ""
+            return ToolApproval(icon: icon, title: "Abrir una sesión de terminal en \(root.lastPathComponent)", detail: command, riskReason: Self.riskReason(command))
+        case .terminalSend:
+            let enter = args["enter"]?.lowercased() != "false"
+            return ToolApproval(
+                icon: icon,
+                title: "Escribir en la sesión \(args["session"] ?? "?")",
+                detail: Self.visibleInput(args["input"] ?? "") + (enter ? " ⏎" : ""),
+                riskReason: Self.riskReason(args["input"] ?? "")
+            )
         }
+    }
+
+    /// Comandos que en modo automático se preguntan igual. No es una lista completa: es una red de seguridad.
+    private static let riskyCommands: [(pattern: String, reason: String)] = [
+        (#"\brm\s+(-\S*[rRf]|--recursive|--force)"#, "borra archivos de forma recursiva o forzada"),
+        (#"\bsudo\b"#, "ejecuta como administrador"),
+        (#"\bgit\s+push\b.*(\s-f\b|--force)"#, "sobrescribe el historial remoto"),
+        (#"\bgit\s+(reset\s+--hard|clean\s+-\S*f)"#, "descarta cambios sin vuelta atrás"),
+        (#"\b(mkfs|diskutil\s+(erase|partition)|dd\s+if=)"#, "escribe directo sobre un disco"),
+        (#"\b(shutdown|reboot|halt|poweroff)\b"#, "apaga o reinicia la máquina"),
+        (#"\bchmod\s+-R\b|\bchown\s+-R\b"#, "cambia permisos de forma recursiva"),
+        (#"\b(kill|killall|pkill)\b"#, "mata procesos"),
+        (#"\b(DROP|TRUNCATE)\s+(TABLE|DATABASE)\b"#, "borra datos de una base de datos"),
+        (#"\|\s*(sh|bash|zsh)\b"#, "ejecuta un script descargado o generado"),
+    ]
+
+    /// nil si el comando no coincide con nada peligroso conocido.
+    static func riskReason(_ command: String) -> String? {
+        riskyCommands.first { command.range(of: $0.pattern, options: [.regularExpression, .caseInsensitive]) != nil }?.reason
     }
 
     // MARK: - Ejecución
@@ -241,7 +360,7 @@ enum AgentTool: String, CaseIterable, Sendable {
             try text.replacingOccurrences(of: oldText, with: args["new_text"] ?? "").write(to: url, atomically: true, encoding: .utf8)
             return ToolOutcome(text: "Archivo editado.")
 
-        case .runCommand, .changeDirectory:
+        case .runCommand, .changeDirectory, .terminalStart, .terminalSend, .terminalRead, .terminalClose:
             throw ToolError("Se ejecuta en otro lado.")
         }
     }

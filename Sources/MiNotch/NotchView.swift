@@ -58,7 +58,7 @@ struct NotchView: View {
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
                 ZStack(alignment: .top) {
                     AIBackgroundTint()
-                    ChatView(chat: chat, workspace: chat.workspace, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
+                    ChatView(chat: chat, workspace: chat.workspace, terminals: chat.terminals, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
                 }
                 .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
                 .transition(.opacity)
@@ -67,7 +67,8 @@ struct NotchView: View {
         .clipShape(shape)
         .overlay {
             // Siempre con colores de IA. Estático en reposo (0 % de CPU); gira mientras responde.
-            GlowBorder(shape: shape, isAnimating: chat.isStreaming)
+            // Quieto mientras espera al usuario (aprobación o contraseña): puede ser mucho rato.
+            GlowBorder(shape: shape, isAnimating: chat.isStreaming && chat.pendingApproval == nil && chat.pendingSecret == nil)
                 .opacity(chat.isStreaming ? 1 : 0.75)
         }
         .frame(width: size.width, height: size.height)

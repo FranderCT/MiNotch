@@ -44,6 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mouseTracker.start()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Que no queden ssh u otras sesiones del asistente corriendo sin dueño.
+        chat.terminals.closeAll()
+    }
+
     private func routeMouse(at point: NSPoint) {
         // Camino rápido: cursor lejos de todas las píldoras y ninguna expandida que deba cerrarse.
         guard hotZones.contains(where: { $0.containsInclusive(point) })
