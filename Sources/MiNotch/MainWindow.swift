@@ -29,6 +29,8 @@ enum InterfaceMode: String, CaseIterable, Sendable {
 final class MainWindowController: NSObject, NSWindowDelegate {
     private let tabs: ChatTabs
     private var window: MainWindow?
+    /// Barra lateral (visible por defecto en la ventana), búsqueda y arrastre de imágenes.
+    let layout = ChatLayoutState(sidebarKey: "windowSidebarVisible", sidebarVisibleByDefault: true)
 
     init(tabs: ChatTabs) {
         self.tabs = tabs
@@ -53,7 +55,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             window.minSize = NSSize(width: 720, height: 440)
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.contentView = NSHostingView(rootView: WindowRootView(tabs: tabs, state: WindowState()))
+            window.contentView = NSHostingView(rootView: MainChatView(tabs: tabs, layout: layout, style: .window)
+                .background(Color(white: 0.055)))
             window.center()
             // Recuerda tamaño y posición entre usos.
             window.setFrameAutosaveName("MiNotchWindow")

@@ -6,6 +6,13 @@ final class NotchState: ObservableObject {
     static let agentSize = CGSize(width: 500, height: 380)
     /// Modo Terminal: ~100 columnas × 26 filas.
     static let terminalSize = CGSize(width: 720, height: 440)
+    /// Con la barra lateral de pestañas visible, el notch se ensancha en lo que ocupa (más el separador).
+    static let sidebarExtraWidth: CGFloat = ChatStyle.notch(topInset: 0).sidebarWidth + 1
+
+    static func expandedSize(terminal: Bool, sidebar: Bool) -> CGSize {
+        let base = terminal ? terminalSize : agentSize
+        return CGSize(width: base.width + (sidebar ? sidebarExtraWidth : 0), height: base.height)
+    }
     static let collapsedWidth: CGFloat = 200
     /// Espacio libre entre la píldora en reposo y el borde inferior de la barra de menú.
     static let gapToWindows: CGFloat = 4
@@ -13,7 +20,6 @@ final class NotchState: ObservableObject {
     @Published var isExpanded = false
     /// Según el modo de la pestaña seleccionada.
     @Published var expandedSize = agentSize
-    @Published var isDropTargeted = false
     /// Se ajusta a la altura de la barra de menú de la pantalla actual.
     @Published var collapsedSize = CGSize(width: collapsedWidth, height: 26)
 
@@ -36,6 +42,7 @@ final class NotchState: ObservableObject {
 struct NotchView: View {
     @ObservedObject var state: NotchState
     @ObservedObject var tabs: ChatTabs
+    @ObservedObject var layout: ChatLayoutState
 
     private var size: CGSize {
         state.isExpanded ? state.expandedSize : state.collapsedSize
@@ -62,14 +69,11 @@ struct NotchView: View {
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
                 ZStack(alignment: .top) {
                     AIBackgroundTint()
-                    let chat = tabs.selected
-                    ChatView(
-                        tabs: tabs, chat: chat, account: tabs.account, workspace: chat.workspace, terminals: chat.terminals,
-                        agents: chat.externalAgents,
-                        topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted
-                    )
-                    // Cada pestaña con su foco y su scroll.
-                    .id(chat.id)
+                    // La misma interfaz que la ventana, a escala.
+                    MainChatView(tabs: tabs, layout: layout, style: .notch(topInset: state.collapsedSize.height), showsWindowButton: true)
+                        // Lejos de las esquinas inferiores redondeadas.
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
                 }
                 .frame(width: state.expandedSize.width, height: state.expandedSize.height)
                 .transition(.opacity)

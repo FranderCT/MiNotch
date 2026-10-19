@@ -69,23 +69,3 @@ struct GlowBorder<S: Shape>: View {
         .allowsHitTesting(false)
     }
 }
-
-/// Tres puntos que laten mientras se espera la primera parte de la respuesta.
-struct TypingDots: View {
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 4) {
-                ForEach(0..<3, id: \.self) { index in
-                    let wave = 0.5 + 0.5 * sin(time * 6 - Double(index) * 0.8)
-                    Circle()
-                        .fill(AITheme.accent)
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(0.75 + 0.35 * wave)
-                        .opacity(0.35 + 0.65 * wave)
-                }
-            }
-        }
-        .frame(height: 16)
-    }
-}

@@ -9,7 +9,7 @@ final class NotchPanel: NSPanel {
     private let state = NotchState()
     private var modeObserver: AnyCancellable?
 
-    init(tabs: ChatTabs) {
+    init(tabs: ChatTabs, layout: ChatLayoutState) {
         super.init(
             contentRect: NSRect(origin: .zero, size: NotchState.agentSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -33,13 +33,14 @@ final class NotchPanel: NSPanel {
         // Click-through mientras el mouse no esté sobre la píldora.
         ignoresMouseEvents = true
 
-        let hosting = FirstClickHostingView(rootView: NotchView(state: state, tabs: tabs))
+        let hosting = FirstClickHostingView(rootView: NotchView(state: state, tabs: tabs, layout: layout))
         hosting.frame = NSRect(origin: .zero, size: NotchState.agentSize)
         hosting.autoresizingMask = [.width, .height]
         contentView = hosting
 
-        modeObserver = tabs.$isTerminalMode.removeDuplicates().sink { [weak self] isTerminal in
-            self?.resize(to: isTerminal ? NotchState.terminalSize : NotchState.agentSize)
+        // Más grande en modo Terminal y con la barra lateral visible.
+        modeObserver = tabs.$isTerminalMode.combineLatest(layout.$isSidebarVisible).sink { [weak self] isTerminal, sidebar in
+            self?.resize(to: NotchState.expandedSize(terminal: isTerminal, sidebar: sidebar))
         }
     }
 

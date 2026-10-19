@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var tabs = ChatTabs(account: account)
     private lazy var settings = SettingsWindowController(account: account)
     private lazy var mainWindow = MainWindowController(tabs: tabs)
+    /// La interfaz del notch: la misma en las píldoras de todas las pantallas (barra lateral oculta por defecto).
+    private let notchLayout = ChatLayoutState(sidebarKey: "notchSidebarVisible", sidebarVisibleByDefault: false)
     /// Notch, ventana o ambos (Configuración). Se aplica al cambiar, sin reiniciar.
     private var interfaceMode = InterfaceMode.current
     private var windowMenuItem: NSMenuItem?
@@ -111,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var updated: [CGDirectDisplayID: NotchPanel] = [:]
         for screen in screens {
             guard let id = screen.displayID else { continue }
-            let panel = panels.removeValue(forKey: id) ?? NotchPanel(tabs: tabs)
+            let panel = panels.removeValue(forKey: id) ?? NotchPanel(tabs: tabs, layout: notchLayout)
             panel.position(on: screen)
             panel.orderFrontRegardless()
             updated[id] = panel
@@ -165,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabsMenu.addItem(withTitle: "Pestaña anterior", action: #selector(previousTab), keyEquivalent: "[").target = self
         tabsMenu.addItem(.separator())
         tabsMenu.addItem(withTitle: "Agente / Terminal", action: #selector(toggleMode), keyEquivalent: "e").target = self
+        let sidebarItem = tabsMenu.addItem(withTitle: "Mostrar u ocultar pestañas", action: #selector(toggleSidebar), keyEquivalent: "s")
+        sidebarItem.keyEquivalentModifierMask = [.control, .command]
+        sidebarItem.target = self
         tabsMenu.addItem(.separator())
         for number in 1...9 {
             let item = tabsMenu.addItem(withTitle: "Pestaña \(number)", action: #selector(selectTabByShortcut(_:)), keyEquivalent: "\(number)")
@@ -228,6 +233,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectTabByShortcut(_ sender: NSMenuItem) {
         guard tabs.tabs.indices.contains(sender.tag - 1) else { return }
         tabs.select(tabs.tabs[sender.tag - 1].id)
+    }
+
+    /// ⌃⌘S: la barra lateral de donde esté el teclado (ventana o notch).
+    @objc private func toggleSidebar() {
+        (NSApp.keyWindow is MainWindow ? mainWindow.layout : notchLayout).toggleSidebar()
     }
 
     @objc private func toggleMode() {
