@@ -132,6 +132,15 @@ final class ChatSession: ObservableObject, Identifiable {
         title ?? workspace.directory.lastPathComponent
     }
 
+    /// Para la barra lateral de la ventana: el nombre que le dio el orquestador, la primera pregunta o la carpeta.
+    var conversationTitle: String {
+        if let title { return title }
+        if let first = messages.first(where: { $0.role == .user })?.text {
+            return String(first.prefix(60))
+        }
+        return workspace.directory.lastPathComponent
+    }
+
     /// Para tab_list y tab_read.
     var statusText: String {
         if pendingApproval != nil { return "esperando que el usuario apruebe una acción" }

@@ -13,10 +13,11 @@ struct ChatView: View {
     @ObservedObject var agents: ExternalAgents
     /// Alto de la franja superior (barra de menú o notch físico); ahí va el encabezado.
     let topInset: CGFloat
+    /// En el notch: botón para abrir la ventana. En la ventana no hace falta.
+    var showsWindowButton = true
 
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
     @FocusState private var isInputFocused: Bool
-    @FocusState private var isSecretFocused: Bool
     /// Una imagen arrastrada está sobre el notch. Vive en NotchState: las Command Line Tools no incluyen la macro `@State`.
     @Binding var isDropTargeted: Bool
 
@@ -36,13 +37,13 @@ struct ChatView: View {
                 missingKey
             }
             if let other = tabs.needingAttention.first(where: { $0.id != chat.id }) {
-                attentionBanner(other)
+                AttentionBanner(other: other) { tabs.select(other.id) }
             }
             if let approval = chat.pendingApproval {
                 ApprovalCard(approval: approval, onDecide: chat.resolveApproval)
             }
             if let request = chat.pendingSecret {
-                secretCard(request)
+                SecretCard(chat: chat, request: request)
             }
             if chat.mode == .agent {
                 if chat.isReadingImage {
@@ -63,54 +64,15 @@ struct ChatView: View {
                 DropHint()
             }
         }
-        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: attachDroppedImage)
+        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted) { ImageAttachment.handleDrop($0, into: chat) }
         .onAppear {
             account.refreshBalanceIfNeeded()
             // La rama pudo cambiar desde otra terminal mientras el notch estaba cerrado.
             workspace.refreshGit()
         }
-        .onChange(of: chat.pendingSecret?.prompt) {
-            if chat.pendingSecret != nil { isSecretFocused = true }
-        }
         .onChange(of: chat.isReadingImage) {
             // Recién adjuntada: listo para escribir la pregunta.
             if chat.isReadingImage { isInputFocused = true }
-        }
-    }
-
-    // MARK: - Imagen adjunta
-
-    /// La miniatura de una captura (⌘⇧4), un archivo de Finder o una imagen arrastrada desde otra app.
-    private func attachDroppedImage(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first else { return false }
-        let chat = chat
-
-        if provider.canLoadObject(ofClass: URL.self) {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                Task { @MainActor in chat.attachImage(at: url) }
-            }
-        } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-                let image = data.flatMap { ImageTextReader.image(from: $0) }
-                Task { @MainActor in chat.attachImage(image) }
-            }
-        } else {
-            return false
-        }
-
-        // Teclado listo para la pregunta: la píldora queda abierta mientras se escribe.
-        NSApp.windows.first { $0 is NotchPanel && $0.frame.contains(NSEvent.mouseLocation) }?.makeKey()
-        return true
-    }
-
-    private func pickImage() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.message = "Elegí una imagen: extraigo su texto para preguntarle a DeepSeek."
-        NSApp.activate()
-        if panel.runModal() == .OK, let url = panel.url {
-            chat.attachImage(at: url)
         }
     }
 
@@ -119,7 +81,7 @@ struct ChatView: View {
     /// Extremos izquierdo y derecho: en la MacBook quedan a los lados del notch físico.
     private var header: some View {
         HStack(spacing: 6) {
-            modeSwitch
+            ModeSwitch(chat: chat)
 
             Spacer()
 
@@ -138,41 +100,23 @@ struct ChatView: View {
             .disabled(chat.messages.isEmpty)
             .opacity(chat.messages.isEmpty ? 0.3 : 1)
             .help("Borrar la conversación de esta pestaña")
+            if showsWindowButton {
+                headerButton("macwindow", help: "Abrir en una ventana (⌘0)", action: tabs.openWindow)
+            }
+            headerButton("gearshape", help: "Configuración: API key, modelo y dónde se muestra MiNotch", action: account.openSettings)
         }
         .padding(.horizontal, 6)
     }
 
-    /// Agente ⇄ Terminal (⌘E). Comparten el shell: lo que hagas en uno lo ve el otro.
-    private var modeSwitch: some View {
-        HStack(spacing: 2) {
-            modeButton(.agent, icon: "sparkles", title: "Agente")
-            modeButton(.terminal, icon: "apple.terminal", title: "Terminal")
-        }
-        .padding(2)
-        .background(.white.opacity(0.08), in: Capsule())
-        .help("Agente o Terminal (⌘E). La terminal de la pestaña la comparten: el asistente la usa como sesión 0.")
-    }
-
-    private func modeButton(_ mode: TabMode, icon: String, title: String) -> some View {
-        let isSelected = chat.mode == mode
-        return Button {
-            if !isSelected { chat.toggleMode() }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .foregroundStyle(isSelected ? AnyShapeStyle(AITheme.accent) : AnyShapeStyle(.white.opacity(0.6)))
-                // Solo el seleccionado muestra el nombre: al lado del notch físico hay poco lugar.
-                if isSelected {
-                    Text(title)
-                }
-            }
-            .font(.system(size: 11, weight: .semibold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(isSelected ? .white.opacity(0.12) : .clear, in: Capsule())
+    private func headerButton(_ icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.7))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(title)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     /// Sin los pasos del asistente que solo pidieron herramientas: esas se ven como filas propias.
@@ -245,207 +189,22 @@ struct ChatView: View {
     /// Carpeta de trabajo (con menú para cambiarla), rama de git y saldo de DeepSeek.
     private var statusBar: some View {
         HStack(spacing: 10) {
-            directoryMenu
+            DirectoryMenu(workspace: workspace, isDisabled: chat.isStreaming)
             if let git = workspace.git {
                 GitBadge(git: git)
             }
             if !terminals.sessions.isEmpty {
-                terminalsMenu
+                TerminalsMenu(terminals: terminals)
             }
             if !agents.jobs.isEmpty {
-                agentsMenu
+                AgentsMenu(agents: agents)
             }
-            approvalModeMenu
+            ApprovalModeMenu(account: account)
             Spacer(minLength: 0)
-            balance
+            BalanceView(account: account)
         }
         .font(.system(size: 10, weight: .medium))
         .foregroundStyle(.white.opacity(0.65))
-    }
-
-    private var directoryMenu: some View {
-        Menu {
-            let others = workspace.recents.filter { $0.path != workspace.directory.path }
-            ForEach(others, id: \.path) { url in
-                Button((url.path as NSString).abbreviatingWithTildeInPath) { workspace.move(to: url) }
-            }
-            if !others.isEmpty { Divider() }
-            Button("Elegir carpeta…", action: workspace.chooseDirectory)
-            Button("Mostrar en Finder", action: workspace.revealInFinder)
-        } label: {
-            Label(workspace.directory.lastPathComponent, systemImage: "folder")
-                .lineLimit(1)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        // Cambiar de carpeta a mitad de una respuesta confundiría al asistente.
-        .disabled(chat.isStreaming)
-        .help("Carpeta de trabajo del asistente: \(workspace.displayPath)")
-    }
-
-    private var approvalModeMenu: some View {
-        Menu {
-            Picker("Aprobación", selection: $account.approvalMode) {
-                ForEach(ApprovalMode.allCases, id: \.self) { mode in
-                    Label(mode.title, systemImage: mode.icon).tag(mode)
-                }
-            }
-            .pickerStyle(.inline)
-        } label: {
-            Label(account.approvalMode.title, systemImage: account.approvalMode.icon)
-                .foregroundStyle(account.approvalMode == .auto ? AITheme.pink : .white.opacity(0.65))
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help(account.approvalMode == .auto
-              ? "Automático: escribe archivos y ejecuta comandos sin preguntar. Los comandos peligrosos (rm -rf, sudo, git push --force…) se preguntan igual."
-              : "Preguntar: cada vez que quiera escribir, ejecutar o cambiar de carpeta, te pide aprobación.")
-    }
-
-    /// Trabajos de agentes externos (Claude Code, Codex…): estado, copiar la respuesta o detenerlos.
-    private var agentsMenu: some View {
-        let running = agents.jobs.filter(\.isRunning).count
-        return Menu {
-            ForEach(agents.jobs, id: \.id) { job in
-                Menu("\(job.id) · \(job.kind.displayName) · \(Self.statusText(job))") {
-                    Text(job.task.prefix(80))
-                    if job.isRunning {
-                        Button("Detener", action: job.stop)
-                    } else if let result = job.result {
-                        Button("Copiar respuesta") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(result, forType: .string)
-                        }
-                    }
-                }
-            }
-            Divider()
-            Button("Quitar los terminados", action: agents.clearFinished)
-                .disabled(running == agents.jobs.count)
-        } label: {
-            Label(running > 0 ? "\(running)" : "\(agents.jobs.count)", systemImage: running > 0 ? "cpu.fill" : "cpu")
-                .foregroundStyle(running > 0 ? AnyShapeStyle(AITheme.cyan) : AnyShapeStyle(.white.opacity(0.65)))
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Agentes externos: \(running) trabajando de \(agents.jobs.count)")
-    }
-
-    private static func statusText(_ job: ExternalAgentJob) -> String {
-        switch job.status {
-        case .running: "trabajando desde las \(job.startedAt.formatted(date: .omitted, time: .shortened))"
-        case .finished: "terminó"
-        case .failed: "falló"
-        case .stopped: "detenido"
-        }
-    }
-
-    /// Sesiones de terminal abiertas por el asistente; desde acá se pueden cerrar.
-    private var terminalsMenu: some View {
-        Menu {
-            ForEach(terminals.sessions, id: \.id) { session in
-                Button("Cerrar \(session.id): \(session.command)\(session.isRunning ? "" : " (terminó)")") {
-                    terminals.close(session.id)
-                }
-            }
-            Divider()
-            Button("Cerrar todas", action: terminals.closeAll)
-        } label: {
-            Label("\(terminals.sessions.count)", systemImage: "apple.terminal")
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help(terminals.sessions.map { "\($0.id): \($0.command)" }.joined(separator: "\n"))
-    }
-
-    /// Otra pestaña espera una aprobación o contraseña: un clic lleva a ella.
-    private func attentionBanner(_ other: ChatSession) -> some View {
-        Button { tabs.select(other.id) } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.bubble.fill")
-                Text("La pestaña \(other.number) (\(other.displayName)) \(other.statusText.replacingOccurrences(of: "esperando que el usuario", with: "espera que"))")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 0)
-                Text("Ver")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(AITheme.pink)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(AITheme.pink.opacity(0.12), in: Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-
-    /// Pedido de contraseña de una sesión: la escribe el usuario y va directo a la terminal.
-    private func secretCard(_ request: SecretRequest) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "lock.fill")
-                    .foregroundStyle(AITheme.accent)
-                Text("Sesión \(request.sessionID): \(request.prompt)")
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(request.command)
-            }
-            HStack(spacing: 8) {
-                SecureField("Contraseña", text: $chat.secretInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .focused($isSecretFocused)
-                    .onSubmit { chat.submitSecret(true) }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                Button("Cancelar") { chat.submitSecret(false) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.75))
-                Button { chat.submitSecret(true) } label: {
-                    Text("Enviar")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 3)
-                        .background(AITheme.accent, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-            Text("Va directo a la terminal: DeepSeek no la ve.")
-                .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.5))
-        }
-        .padding(8)
-        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(AITheme.accent, lineWidth: 1)
-                .opacity(0.6)
-        )
-    }
-
-    private var balance: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "wallet.bifold")
-            Text(account.balance.map(\.summary) ?? (account.isRefreshingBalance ? "Consultando…" : "Sin saldo"))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            if account.balanceError != nil {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(AITheme.pink)
-            }
-            Spacer(minLength: 0)
-            Button(action: account.refreshBalance) {
-                Image(systemName: "arrow.clockwise")
-            }
-            .buttonStyle(.plain)
-            .disabled(account.isRefreshingBalance)
-            .accessibilityLabel("Actualizar saldo de DeepSeek")
-        }
-        .help(account.balanceError.map { "No se pudo actualizar: \($0). El saldo mostrado puede estar desactualizado." }
-              ?? "Saldo de tu cuenta DeepSeek. Se actualiza al abrir el chat y después de cada consulta.")
     }
 
     private var emptyState: some View {
@@ -488,7 +247,7 @@ struct ChatView: View {
         let canPress = chat.isStreaming || (!chat.isReadingImage && (!isEmpty || hasImage))
 
         return HStack(spacing: 8) {
-            Button(action: pickImage) {
+            Button { ImageAttachment.pick(into: chat) } label: {
                 Image(systemName: "photo.badge.plus")
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.75))
@@ -529,7 +288,7 @@ struct ChatView: View {
     }
 }
 
-private struct MessageRow: View {
+struct MessageRow: View {
     let message: ChatMessage
     /// Es el último mensaje y la respuesta sigue en curso.
     let isActive: Bool
@@ -582,14 +341,14 @@ private struct MessageRow: View {
     }
 
     /// Negritas, cursivas, código y links; conserva los saltos de línea.
-    private static func markdown(_ text: String) -> AttributedString {
+    static func markdown(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
     }
 }
 
 /// Texto de una imagen adjunta a una pregunta: muestra el comienzo y el tooltip, un fragmento más largo.
-private struct ImageTextChip: View {
+struct ImageTextChip: View {
     let text: String
     var wasTrimmed = false
     /// Solo en el chip pendiente de enviar: quita el texto adjunto.
@@ -630,7 +389,7 @@ private struct ImageTextChip: View {
 }
 
 /// Mientras Vision extrae el texto (la primera vez en el sistema puede tardar un rato).
-private struct ReadingImageChip: View {
+struct ReadingImageChip: View {
     var body: some View {
         HStack(spacing: 6) {
             ProgressView()
@@ -646,7 +405,7 @@ private struct ReadingImageChip: View {
 }
 
 /// Aviso mientras se arrastra una imagen sobre el notch.
-private struct DropHint: View {
+struct DropHint: View {
     var body: some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
             .strokeBorder(AITheme.accent, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
@@ -685,7 +444,7 @@ private struct ToolRow: View {
 }
 
 /// Acción del asistente que espera aprobación: qué quiere hacer, el detalle y los botones.
-private struct ApprovalCard: View {
+struct ApprovalCard: View {
     let approval: ToolApproval
     let onDecide: (Bool) -> Void
 
@@ -742,22 +501,25 @@ private struct ApprovalCard: View {
 }
 
 /// La terminal de la pestaña (SwiftTerm). La vista vive en TabShell: cambiar de modo o de pestaña no la cierra.
-private struct TerminalHost: NSViewRepresentable {
+struct TerminalHost: NSViewRepresentable {
     let shell: TabShell
     let directory: URL
 
-    func makeNSView(context: Context) -> ShellTerminalView {
+    func makeNSView(context: Context) -> TerminalContainer {
         shell.startIfNeeded(in: directory)
-        let view = shell.view
-        // Recién mostrada: el teclado va a la terminal.
-        DispatchQueue.main.async {
-            view.window?.makeKey()
-            view.window?.makeFirstResponder(view)
-        }
-        return view
+        let container = TerminalContainer()
+        shell.attach(to: container)
+        return container
     }
 
-    func updateNSView(_ view: ShellTerminalView, context: Context) {}
+    func updateNSView(_ container: TerminalContainer, context: Context) {}
+
+    func makeCoordinator() -> TabShell { shell }
+
+    /// El shell es de la pestaña: si se cierra el notch, la terminal vuelve a la ventana (si está abierta).
+    static func dismantleNSView(_ container: TerminalContainer, coordinator shell: TabShell) {
+        shell.detach(from: container)
+    }
 }
 
 /// Una pestaña: carpeta y estado (respondiendo, o esperando aprobación o contraseña).
@@ -807,8 +569,10 @@ private struct TabChip: View {
 }
 
 /// Rama de git de la carpeta de trabajo; un punto si hay cambios sin commitear.
-private struct GitBadge: View {
+struct GitBadge: View {
     let git: GitInfo
+    /// En la ventana: también las líneas +/−, como en una terminal.
+    var showsDiffStat = false
 
     var body: some View {
         HStack(spacing: 3) {
@@ -818,7 +582,12 @@ private struct GitBadge: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: 110, alignment: .leading)
             if git.hasChanges == true {
-                Circle().fill(AITheme.pink).frame(width: 5, height: 5)
+                if showsDiffStat, git.insertions + git.deletions > 0 {
+                    Text("+\(git.insertions)").foregroundStyle(Color.green.opacity(0.85))
+                    Text("−\(git.deletions)").foregroundStyle(AITheme.pink)
+                } else {
+                    Circle().fill(AITheme.pink).frame(width: 5, height: 5)
+                }
             }
         }
         .help(help)
@@ -827,7 +596,7 @@ private struct GitBadge: View {
     private var help: String {
         let head = git.isDetached ? "HEAD separado en \(git.branch)" : "Rama \(git.branch)"
         let changes = switch git.hasChanges {
-        case true?: "Hay cambios sin commitear"
+        case true?: "Hay cambios sin commitear (+\(git.insertions) −\(git.deletions) líneas)"
         case false?: "Sin cambios pendientes"
         case nil: "Revisando cambios…"
         }
@@ -835,7 +604,7 @@ private struct GitBadge: View {
     }
 }
 
-private struct ErrorRow: View {
+struct ErrorRow: View {
     let text: String
 
     var body: some View {

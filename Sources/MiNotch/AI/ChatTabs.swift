@@ -8,6 +8,8 @@ final class ChatTabs: ObservableObject {
     static let maxTabs = 8
 
     let account: DeepSeekAccount
+    /// Lo define AppDelegate: abre la ventana principal (y la activa si estaba en "solo notch").
+    var onOpenWindow: (() -> Void)?
     @Published private(set) var tabs: [ChatSession]
     @Published private(set) var selectedID: UUID
     /// Alguna pestaña está respondiendo sin esperar al usuario: el borde gira.
@@ -36,6 +38,10 @@ final class ChatTabs: ObservableObject {
             guard mode == .auto else { return }
             self?.tabs.forEach { $0.approvePendingIfSafe() }
         }
+    }
+
+    func openWindow() {
+        onOpenWindow?()
     }
 
     var selected: ChatSession {

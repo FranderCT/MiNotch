@@ -13,6 +13,8 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     private var lastSentAt = Date.distantPast
 
     private static let screenLines = 80
+    /// Lugares donde se muestra (notch y/o ventana). La vista de AppKit solo puede estar en uno a la vez.
+    private let hosts = NSHashTable<TerminalContainer>.weakObjects()
 
     override init() {
         super.init()
@@ -47,6 +49,24 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         if view.process.shellPid != 0 { kill(view.process.shellPid, SIGHUP) }
         view.terminate()
         isRunning = false
+    }
+
+    // MARK: - Dónde se muestra
+
+    /// El contenedor que acaba de aparecer se queda con la terminal.
+    func attach(to container: TerminalContainer) {
+        hosts.add(container)
+        container.adopt(view)
+    }
+
+    /// Al desaparecer un contenedor (por ejemplo, se cierra el notch), la terminal vuelve a otro visible.
+    func detach(from container: TerminalContainer) {
+        hosts.remove(container)
+        guard view.superview == container else { return }
+        view.removeFromSuperview()
+        if let other = hosts.allObjects.first(where: { $0.window != nil }) {
+            other.adopt(view)
+        }
     }
 
     // MARK: - Uso desde el asistente
@@ -87,6 +107,23 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         MainActor.assumeIsolated {
             self.isRunning = false
             self.exitCode = exitCode
+        }
+    }
+}
+
+/// Hueco para la terminal en el notch o en la ventana.
+final class TerminalContainer: NSView {
+    func adopt(_ terminal: NSView) {
+        guard terminal.superview != self else { return }
+        terminal.removeFromSuperview()
+        terminal.frame = bounds
+        terminal.autoresizingMask = [.width, .height]
+        addSubview(terminal)
+        // Recién mostrada: el teclado va a la terminal.
+        DispatchQueue.main.async { [weak self, weak terminal] in
+            guard let self, let terminal, terminal.superview == self else { return }
+            self.window?.makeKey()
+            self.window?.makeFirstResponder(terminal)
         }
     }
 }

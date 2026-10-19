@@ -40,6 +40,7 @@ private struct SettingsView: View {
     @ObservedObject var account: DeepSeekAccount
     @ObservedObject var draft: KeyDraft
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
+    @AppStorage(InterfaceMode.defaultsKey) private var interfaceMode = InterfaceMode.notch
 
     var body: some View {
         Form {
@@ -82,6 +83,19 @@ private struct SettingsView: View {
                 }
             } footer: {
                 Text("deepseek-flash es rápido y barato; deepseek-v4-pro es más capaz.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Picker("Mostrar en", selection: $interfaceMode) {
+                    ForEach(InterfaceMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("Interfaz")
+            } footer: {
+                Text("La ventana es una ventana normal de macOS (Dock y ⌘Tab) con las mismas pestañas que el notch. Con las dos, comparten pestañas y conversaciones.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

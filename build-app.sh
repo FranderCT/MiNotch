@@ -6,10 +6,18 @@ cd "$(dirname "$0")"
 
 swift build -c release
 
+# Ícono: se regenera solo si cambió el logo o el script.
+LOGO="Assets/Brand/minotch-logo.png"
+ICON=".build/AppIcon.icns"
+if [[ ! -f "$ICON" || "$LOGO" -nt "$ICON" || scripts/make-icon.swift -nt "$ICON" ]]; then
+    swift scripts/make-icon.swift "$LOGO" "$ICON"
+fi
+
 APP="MiNotch.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$(swift build -c release --show-bin-path)/MiNotch" "$APP/Contents/MacOS/MiNotch"
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -18,6 +26,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <dict>
     <key>CFBundleExecutable</key>
     <string>MiNotch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.frandercarrillo.MiNotch</string>
     <key>CFBundleName</key>

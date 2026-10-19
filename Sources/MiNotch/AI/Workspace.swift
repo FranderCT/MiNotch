@@ -82,13 +82,17 @@ final class Workspace: ObservableObject {
         // Mientras llega el estado nuevo, se conserva el anterior si es el mismo repo.
         if let current = git, current.root == info.root {
             info.hasChanges = current.hasChanges
+            info.insertions = current.insertions
+            info.deletions = current.deletions
         }
         git = info
         let root = info.root
         gitStatusTask = Task { [weak self] in
-            let hasChanges = await GitInfo.hasChanges(at: root)
+            let status = await GitInfo.status(at: root)
             guard let self, !Task.isCancelled, self.git?.root == root else { return }
-            self.git?.hasChanges = hasChanges
+            self.git?.hasChanges = status?.hasChanges
+            self.git?.insertions = status?.insertions ?? 0
+            self.git?.deletions = status?.deletions ?? 0
         }
     }
 }
@@ -102,12 +106,15 @@ struct GitInfo: Equatable, Sendable {
     let isDetached: Bool
     /// nil mientras no se sabe.
     var hasChanges: Bool?
+    /// Líneas agregadas y quitadas respecto del último commit (`git diff --shortstat HEAD`).
+    var insertions = 0
+    var deletions = 0
 
     /// Una línea para el system prompt.
     var summary: String {
         let head = isDetached ? "HEAD separado en el commit \(branch)" : "rama \(branch)"
         let changes = switch hasChanges {
-        case true?: ", con cambios sin commitear"
+        case true?: ", con cambios sin commitear (+\(insertions) −\(deletions) líneas)"
         case false?: ", sin cambios pendientes"
         case nil: ""
         }
@@ -144,19 +151,30 @@ struct GitInfo: Equatable, Sendable {
             : dotGit.deletingLastPathComponent().appendingPathComponent(path).standardizedFileURL
     }
 
-    /// `git status --porcelain`: cualquier línea es un cambio (incluye archivos nuevos). nil si git falla.
-    static func hasChanges(at root: URL) async -> Bool? {
+    /// Cambios sin commitear (`git status --porcelain`, incluye archivos nuevos) y líneas +/−. nil si git falla.
+    static func status(at root: URL) async -> (hasChanges: Bool, insertions: Int, deletions: Int)? {
         await Task.detached(priority: .utility) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            process.arguments = ["-C", root.path, "status", "--porcelain"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-            guard (try? process.run()) != nil else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return process.terminationStatus == 0 ? !data.isEmpty : nil
+            guard let porcelain = run(["status", "--porcelain"], in: root) else { return nil }
+            // "3 files changed, 326 insertions(+), 19 deletions(-)"; sin commits todavía, falla: 0 y 0.
+            let stat = run(["diff", "--shortstat", "HEAD"], in: root) ?? ""
+            func count(_ word: String) -> Int {
+                stat.firstMatch(of: try! Regex("(\\d+) \(word)"))
+                    .flatMap { Int($0.output[1].substring ?? "") } ?? 0
+            }
+            return (!porcelain.isEmpty, count("insertion"), count("deletion"))
         }.value
+    }
+
+    private static func run(_ args: [String], in root: URL) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", root.path] + args
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 }
