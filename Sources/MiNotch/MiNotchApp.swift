@@ -24,9 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotZones: [NSRect] = []
     private let screenManager = ScreenManager()
     private let mouseTracker = MouseTracker()
+    /// Una sola conversación, compartida por las píldoras de todas las pantallas.
+    private let chat = ChatSession()
+    private lazy var settings = SettingsWindowController(chat: chat)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
+        setupMainMenu()
+        chat.onOpenSettings = { [weak self] in self?.openSettings() }
 
         screenManager.onScreensChange = { [weak self] screens in
             self?.syncPanels(with: screens)
@@ -51,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var updated: [CGDirectDisplayID: NotchPanel] = [:]
         for screen in screens {
             guard let id = screen.displayID else { continue }
-            let panel = panels.removeValue(forKey: id) ?? NotchPanel()
+            let panel = panels.removeValue(forKey: id) ?? NotchPanel(chat: chat)
             panel.position(on: screen)
             panel.orderFrontRegardless()
             updated[id] = panel
@@ -66,9 +71,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.image = NSImage(systemSymbolName: "capsule.fill", accessibilityDescription: "MiNotch")
 
         let menu = NSMenu()
+        let settingsItem = NSMenuItem(title: "Configurar API key…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Salir", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
 
         statusItem = item
+    }
+
+    /// Menú principal invisible (app .accessory): sin él no funcionan Cmd+C/V/X/A/Z en los campos de texto.
+    private func setupMainMenu() {
+        let edit = NSMenu(title: "Editar")
+        edit.addItem(withTitle: "Deshacer", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Rehacer", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cortar", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copiar", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Pegar", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Seleccionar todo", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        let mainMenu = NSMenu()
+        mainMenu.addItem(editItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func openSettings() {
+        settings.show()
     }
 }

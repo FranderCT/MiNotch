@@ -3,7 +3,7 @@ import SwiftUI
 /// Estado compartido entre el panel (que detecta el hover) y la vista (que lo dibuja).
 @MainActor
 final class NotchState: ObservableObject {
-    static let expandedSize = CGSize(width: 400, height: 120)
+    static let expandedSize = CGSize(width: 480, height: 300)
     static let collapsedWidth: CGFloat = 200
     /// Espacio libre entre la píldora en reposo y el borde inferior de la barra de menú.
     static let gapToWindows: CGFloat = 4
@@ -30,23 +30,45 @@ final class NotchState: ObservableObject {
 
 struct NotchView: View {
     @ObservedObject var state: NotchState
+    @ObservedObject var chat: ChatSession
 
     private var size: CGSize {
         state.isExpanded ? NotchState.expandedSize : state.collapsedSize
     }
 
     private var cornerRadius: CGFloat {
-        state.isExpanded ? 28 : 14
+        state.isExpanded ? 32 : 14
     }
 
-    var body: some View {
+    private var shape: UnevenRoundedRectangle {
         // Bordes superiores rectos (pegados al borde de la pantalla), inferiores redondeados.
         UnevenRoundedRectangle(
             bottomLeadingRadius: cornerRadius,
             bottomTrailingRadius: cornerRadius,
             style: .continuous
         )
+    }
+
+    var body: some View {
+        shape
         .fill(.black)
+        .overlay(alignment: .top) {
+            if state.isExpanded {
+                // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
+                ZStack(alignment: .top) {
+                    AIBackgroundTint()
+                    ChatView(chat: chat, topInset: state.collapsedSize.height)
+                }
+                .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
+                .transition(.opacity)
+            }
+        }
+        .clipShape(shape)
+        .overlay {
+            // Siempre con colores de IA. Estático en reposo (0 % de CPU); gira mientras responde.
+            GlowBorder(shape: shape, isAnimating: chat.isStreaming)
+                .opacity(chat.isStreaming ? 1 : 0.75)
+        }
         .frame(width: size.width, height: size.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.72), value: state.isExpanded)

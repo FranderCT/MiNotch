@@ -7,7 +7,7 @@ import SwiftUI
 final class NotchPanel: NSPanel {
     private let state = NotchState()
 
-    init() {
+    init(chat: ChatSession) {
         super.init(
             contentRect: NSRect(origin: .zero, size: NotchState.expandedSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -23,6 +23,7 @@ final class NotchPanel: NSPanel {
         isMovable = false
         isFloatingPanel = true
         hidesOnDeactivate = false
+        // Toma el teclado solo al hacer clic en el campo de texto, sin activar la app.
         becomesKeyOnlyIfNeeded = true
         // Por encima de la barra de menú.
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
@@ -30,12 +31,12 @@ final class NotchPanel: NSPanel {
         // Click-through mientras el mouse no esté sobre la píldora.
         ignoresMouseEvents = true
 
-        let hosting = NSHostingView(rootView: NotchView(state: state))
+        let hosting = FirstClickHostingView(rootView: NotchView(state: state, chat: chat))
         hosting.frame = NSRect(origin: .zero, size: NotchState.expandedSize)
         contentView = hosting
     }
 
-    override var canBecomeKey: Bool { false }
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
     /// Centra el panel pegado al borde superior de la pantalla.
@@ -66,10 +67,27 @@ final class NotchPanel: NSPanel {
     }
 
     func updateHover(mouse: NSPoint = NSEvent.mouseLocation) {
-        let inside = pillRect.containsInclusive(mouse)
-        guard inside != state.isExpanded else { return }
+        // Mientras se escribe (panel con teclado) queda abierta aunque el mouse salga.
+        let expand = pillRect.containsInclusive(mouse) || isKeyWindow
+        guard expand != state.isExpanded else { return }
 
-        state.isExpanded = inside
-        ignoresMouseEvents = !inside
+        state.isExpanded = expand
+        ignoresMouseEvents = !expand
     }
+
+    override func becomeKey() {
+        super.becomeKey()
+        updateHover()
+    }
+
+    // Se dispara al hacer clic en otra app: si el mouse ya no está encima, se cierra.
+    override func resignKey() {
+        super.resignKey()
+        updateHover()
+    }
+}
+
+/// Los botones responden al primer clic aunque el panel no tenga el foco.
+private final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
