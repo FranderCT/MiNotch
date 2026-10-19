@@ -1,0 +1,3 @@
+Edited with the built-in ImageGen tool.
+
+Use case: text-localization / logo-brand edit. Edit the provided MiNotch logo by adding the exact English credit "Designed by FranderCT" centered beneath the glowing capsule, in the empty lower area of the icon tile. Spell exactly Designed by FranderCT, respecting capitalization. Use elegant clean modern sans-serif typography, modest size but clearly legible, soft cool white with only a very subtle blue tint. Keep the capsule, sparkle, violet-blue-cyan neon lighting, black midnight background, rounded tile, square framing and all existing details unchanged. Add only this one line of text, with generous breathing room below the capsule. No other text or changes.
