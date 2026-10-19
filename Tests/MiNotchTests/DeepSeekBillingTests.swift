@@ -8,12 +8,20 @@ private func XCTAssertTrue(_ value: Bool) { precondition(value) }
 private func XCTAssertNil<T>(_ value: T?) { precondition(value == nil) }
 private func XCTAssertNotNil<T>(_ value: T?) { precondition(value != nil) }
 
-// El cliente usa únicamente estos campos del mensaje al construir la solicitud.
+// Dobles del contexto de chat: estas pruebas ejercitan el decodificador SSE y la facturación.
 struct ChatMessage: Sendable {
-    enum Role: String, Sendable { case user, assistant }
+    enum Role: String, Sendable { case user, assistant, tool }
     let role: Role
     let text: String
+    var apiContent: String { text }
+    var reasoning = ""
+    var toolCalls: [ToolCall] = []
+    var toolCallID: String?
 }
+struct GitInfo { var summary = "" }
+struct ToolCall: Sendable { let id: String; let name: String; let arguments: String }
+struct ToolDefinition: Encodable {}
+enum AgentTool { static let definitions: [ToolDefinition] = [] }
 
 @main
 struct DeepSeekBillingTests {

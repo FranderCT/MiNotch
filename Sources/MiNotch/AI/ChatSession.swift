@@ -538,7 +538,7 @@ final class ChatSession: ObservableObject, Identifiable {
         switch tool {
         case .terminalSend:
             let enter = args["enter"]?.lowercased() != "false"
-            shell.write((args["input"] ?? "") + (enter ? "\r" : ""), in: workspace.directory)
+            await shell.write((args["input"] ?? "") + (enter ? "\r" : ""), in: workspace.directory)
         case .terminalClose:
             return ToolOutcome(text: "La sesión 0 es la terminal de la pestaña: no se cierra. Para salir de un ssh ahí, mandá exit.", failed: true)
         default:
@@ -553,10 +553,14 @@ final class ChatSession: ObservableObject, Identifiable {
                 screen += "\n[El usuario no ingresó la contraseña.]"
                 break
             }
-            shell.write(secret + "\r", in: workspace.directory)
+            await shell.write(secret + "\r", in: workspace.directory)
             screen = await shell.readScreen(maxWait: maxWait).replacingOccurrences(of: secret, with: "••••")
         }
-        return ToolOutcome(text: "Pantalla de la terminal de la pestaña (últimas líneas):\n\(screen)")
+        let status = shell.isRunning ? shell.commandState.summary : "Shell terminado · código \(shell.exitCode.map(String.init) ?? "desconocido")"
+        let failed = shell.isRunning
+            ? shell.commandState.phase == .ready && (shell.commandState.lastExitCode.map { $0 != 0 } ?? false)
+            : (shell.exitCode.map { $0 != 0 } ?? false)
+        return ToolOutcome(text: "\(status).\nPantalla de la terminal de la pestaña (últimas líneas):\n\(screen)", failed: failed)
     }
 
     /// Lee la salida nueva y, si termina pidiendo una contraseña, se la pide al usuario (no al modelo).
@@ -576,6 +580,8 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         if !session.isRunning {
             transcript += "\n[La sesión terminó con código \(session.exitStatus)]"
+        } else {
+            transcript += "\n[La sesión sigue en ejecución. Una pausa en la salida no indica que terminó.]"
         }
         return transcript.isEmpty ? "(sin salida nueva)" : transcript
     }

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Ventana de configuración: API key (en el Llavero) y modelo.
+/// Preferencias por categoría, compartidas entre notch y ventana.
 @MainActor
 final class SettingsWindowController {
     private let account: DeepSeekAccount
@@ -41,8 +41,25 @@ private struct SettingsView: View {
     @ObservedObject var draft: KeyDraft
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
     @AppStorage(InterfaceMode.defaultsKey) private var interfaceMode = InterfaceMode.notch
+    @AppStorage("terminalFontSize") private var terminalFontSize = 12.0
+    @AppStorage(LocalDiagnostics.enabledKey) private var diagnosticsEnabled = false
+    @ObservedObject private var diagnostics = LocalDiagnostics.shared
 
     var body: some View {
+        TabView {
+            accountSettings.tabItem { Label("Cuenta", systemImage: "person.crop.circle") }
+            interfaceSettings.tabItem { Label("Apariencia", systemImage: "macwindow") }
+            terminalSettings.tabItem { Label("Terminal", systemImage: "terminal") }
+            agentSettings.tabItem { Label("Agentes", systemImage: "cpu") }
+            shortcuts.tabItem { Label("Atajos", systemImage: "keyboard") }
+            privacySettings.tabItem { Label("Privacidad", systemImage: "hand.raised") }
+        }
+        .padding(12)
+        .frame(width: 580, height: 520)
+        .onAppear { account.refreshBalanceIfNeeded() }
+    }
+
+    private var accountSettings: some View {
         Form {
             Section {
                 LabeledContent("Estado") {
@@ -87,6 +104,12 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+        }
+        .formStyle(.grouped)
+    }
+
+    private var interfaceSettings: some View {
+        Form {
             Section {
                 Picker("Mostrar en", selection: $interfaceMode) {
                     ForEach(InterfaceMode.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -101,9 +124,83 @@ private struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 440)
-        .fixedSize()
-        .onAppear { account.refreshBalanceIfNeeded() }
+    }
+
+    private var terminalSettings: some View {
+        Form {
+            Section("Texto") {
+                Slider(value: $terminalFontSize, in: 10...24, step: 1) {
+                    Text("Tamaño: \(Int(terminalFontSize)) pt")
+                }
+            }
+            Section("Estado de los comandos") {
+                Text("La terminal local informa cuándo empieza y termina cada comando y su código de salida. En SSH, otros shells o aplicaciones interactivas, el estado corresponde al proceso local hasta que vuelve el prompt.")
+                    .font(.callout)
+            }
+            Section("Abrir proyectos") {
+                Text("Desde Finder: seleccioná una carpeta y elegí Servicios → Abrir carpeta en MiNotch. También podés copiar su enlace desde el menú de la carpeta en MiNotch.")
+                    .font(.callout)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var agentSettings: some View {
+        Form {
+            Section("Aprobaciones") {
+                Picker("Antes de modificar o ejecutar", selection: $account.approvalMode) {
+                    ForEach(ApprovalMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text("El acceso total de un agente externo siempre requiere aprobación.").font(.footnote)
+            }
+            Section("Actividad") {
+                Text("Los trabajos muestran los eventos que entrega cada CLI: herramientas, ejecución y errores. Grok conserva su formato de respuesta final.")
+                Text("Hasta \(ExternalAgents.maxRunning) trabajos simultáneos por pestaña. Podés detenerlos desde su actividad o desde el menú de agentes.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var shortcuts: some View {
+        Form {
+            Section("Pestañas y ventanas") {
+                LabeledContent("Nueva pestaña", value: "⌘T")
+                LabeledContent("Cerrar pestaña o ventana", value: "⌘W")
+                LabeledContent("Siguiente / anterior", value: "⌘] / ⌘[")
+                LabeledContent("Seleccionar pestaña", value: "⌘1…⌘8")
+                LabeledContent("Agente / Terminal", value: "⌘E")
+                LabeledContent("Mostrar barra lateral", value: "⌃⌘S")
+                LabeledContent("Abrir ventana", value: "⌘0")
+                LabeledContent("Configuración", value: "⌘,")
+            }
+            Text("Los atajos de pestañas funcionan cuando MiNotch tiene el foco.").font(.footnote)
+        }
+        .formStyle(.grouped)
+    }
+
+    private var privacySettings: some View {
+        Form {
+            Section("Credenciales y contenido") {
+                Text("La API key se guarda en el Llavero. Los mensajes y resultados de herramientas se envían al proveedor del asistente; cada CLI externo usa su propia cuenta y configuración.")
+                    .font(.callout)
+            }
+            Section("Diagnóstico local") {
+                Toggle("Activar diagnóstico local", isOn: $diagnosticsEnabled)
+                    .onChange(of: diagnosticsEnabled) { if !diagnosticsEnabled { diagnostics.clear() } }
+                Text("Hasta 200 eventos en memoria: respuesta de la cola principal al abrir el notch, duración y fallos de agentes, y códigos de salida del shell. No incluye comandos, rutas, conversaciones ni claves. La preferencia se recuerda; los eventos se borran al cerrar la app.")
+                    .font(.footnote)
+                LabeledContent("Eventos registrados", value: "\(diagnostics.entries.count)")
+                HStack {
+                    Button("Copiar diagnóstico") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(diagnostics.report, forType: .string)
+                    }
+                    Button("Borrar", action: diagnostics.clear)
+                }
+                .disabled(diagnostics.entries.isEmpty)
+            }
+        }
+        .formStyle(.grouped)
     }
 
     private func save() {

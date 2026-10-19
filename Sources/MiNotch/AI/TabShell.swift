@@ -9,6 +9,8 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     let view = ShellTerminalView(frame: NSRect(x: 0, y: 0, width: 680, height: 360))
     @Published private(set) var isRunning = false
     @Published private(set) var exitCode: Int32?
+    @Published private(set) var commandState = ShellCommandState()
+    private var integration: ShellIntegration?
     /// Momento del último envío del asistente: la salida posterior es su respuesta.
     private var lastSentAt = Date.distantPast
 
@@ -32,6 +34,19 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         environment["TERM"] = "xterm-256color"
         environment["COLORTERM"] = "truecolor"
         environment["LANG"] = environment["LANG"] ?? "es_ES.UTF-8"
+        commandState = ShellCommandState()
+        do {
+            integration = try ShellIntegration(environment: &environment)
+            let token = integration!.token
+            view.getTerminal().registerOscHandler(code: ShellIntegration.oscCode) { [weak self] bytes in
+                MainActor.assumeIsolated {
+                    self?.commandState.receive(String(decoding: bytes, as: UTF8.self), token: token)
+                }
+            }
+        } catch {
+            commandState.phase = .unavailable
+            LocalDiagnostics.shared.record(.shellIntegrationFailure)
+        }
         // "-zsh": shell de login, como Terminal.app (carga .zprofile: Homebrew, fnm…).
         view.startProcess(
             executable: "/bin/zsh",
@@ -49,6 +64,7 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         if view.process.shellPid != 0 { kill(view.process.shellPid, SIGHUP) }
         view.terminate()
         isRunning = false
+        integration = nil
     }
 
     // MARK: - Dónde se muestra
@@ -72,19 +88,32 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     // MARK: - Uso desde el asistente
 
     /// Texto tal cual: incluir "\r" para Enter o "\u{03}" para Ctrl+C.
-    func write(_ text: String, in directory: URL) {
+    func write(_ text: String, in directory: URL) async {
         startIfNeeded(in: directory)
+        let start = Date()
+        while commandState.phase == .starting, isRunning, Date().timeIntervalSince(start) < 3 {
+            if Task.isCancelled { return }
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        guard !Task.isCancelled, isRunning else { return }
+        if commandState.phase == .starting { commandState.phase = .unavailable }
+        if commandState.phase == .ready {
+            commandState.phase = .awaitingInput
+            commandState.lastExitCode = nil
+        }
         lastSentAt = Date()
         view.send(txt: text)
     }
 
-    /// Espera a que la salida se calme (o `maxWait`) y devuelve las últimas líneas de la pantalla.
+    /// Espera el prompt confirmado por zsh, un pedido de contraseña o el límite de lectura.
     func readScreen(maxWait: TimeInterval) async -> String {
         let start = Date()
         while !Task.isCancelled, isRunning, Date().timeIntervalSince(start) < maxWait {
             try? await Task.sleep(for: .milliseconds(150))
             let last = view.lastOutputAt
-            if last > lastSentAt, Date().timeIntervalSince(last) >= 1.0 { break }
+            if commandState.phase == .ready { break }
+            if last > lastSentAt, Date().timeIntervalSince(last) >= 0.3,
+               TerminalSession.secretPrompt(in: screenText) != nil { break }
         }
         return screenText
     }
@@ -107,6 +136,8 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         MainActor.assumeIsolated {
             self.isRunning = false
             self.exitCode = exitCode
+            self.integration = nil
+            LocalDiagnostics.shared.record(.shellExit, value: Double(exitCode ?? -1))
         }
     }
 }

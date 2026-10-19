@@ -281,10 +281,21 @@ private struct ChatColumn: View {
                 TerminalHost(shell: chat.shell, directory: workspace.directory)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .padding(style.isNotch ? 6 : 8)
+                ShellStatusView(shell: chat.shell)
             } else if account.hasAPIKey {
                 transcript
             } else {
                 missingKey
+            }
+            if agents.jobs.contains(where: { $0.isRunning || $0.status == .failed }) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(agents.jobs.filter { $0.isRunning || $0.status == .failed }) { job in
+                            AgentActivityRow(job: job)
+                        }
+                    }.padding(8)
+                }
+                .frame(maxHeight: style.isNotch ? 72 : 120)
             }
             cards
             if chat.mode == .agent {

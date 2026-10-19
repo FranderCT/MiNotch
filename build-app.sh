@@ -44,6 +44,21 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>com.frandercarrillo.MiNotch.project</string>
+        <key>CFBundleURLSchemes</key><array><string>minotch</string></array>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+    </dict></array>
+    <key>NSServices</key>
+    <array><dict>
+        <key>NSMenuItem</key><dict><key>default</key><string>Abrir carpeta en MiNotch</string></dict>
+        <key>NSMessage</key><string>openFolder</string>
+        <key>NSPortName</key><string>MiNotch</string>
+        <key>NSSendTypes</key><array><string>public.file-url</string><string>NSFilenamesPboardType</string></array>
+        <key>NSRequiredContext</key><dict/>
+        <key>NSSendFileTypes</key><array><string>public.folder</string></array>
+    </dict></array>
 </dict>
 </plist>
 PLIST

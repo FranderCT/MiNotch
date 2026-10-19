@@ -85,9 +85,15 @@ final class NotchPanel: NSPanel {
         // Mientras se escribe (panel con teclado) queda abierta aunque el mouse salga.
         let expand = pillRect.containsInclusive(mouse) || isKeyWindow
         guard expand != state.isExpanded else { return }
-
+        let started = ProcessInfo.processInfo.systemUptime
         state.isExpanded = expand
         ignoresMouseEvents = !expand
+        if expand {
+            DispatchQueue.main.async {
+                // Tiempo hasta el siguiente turno de la cola principal; no mide el fin de la animación.
+                LocalDiagnostics.shared.record(.notchOpen, value: (ProcessInfo.processInfo.systemUptime - started) * 1000)
+            }
+        }
     }
 
     override func becomeKey() {

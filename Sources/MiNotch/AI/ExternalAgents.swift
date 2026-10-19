@@ -32,7 +32,7 @@ enum ExternalAgentKind: String, CaseIterable, Sendable {
         switch self {
         case .claude:
             let mode = switch access { case .read: "plan"; case .edit: "acceptEdits"; case .full: "bypassPermissions" }
-            args = ["-p", prompt, "--output-format", "json", "--permission-mode", mode]
+            args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", mode]
             if let sessionID { args += ["--resume", sessionID] }
         case .codex:
             // -c sandbox_mode sirve también al retomar (`exec resume` no acepta -s).
@@ -43,7 +43,7 @@ enum ExternalAgentKind: String, CaseIterable, Sendable {
             args.append(prompt)
             return args
         case .cursor:
-            args = ["-p", prompt, "--output-format", "json", "--workspace", directory.path, "--trust"]
+            args = ["-p", prompt, "--output-format", "stream-json", "--workspace", directory.path, "--trust"]
             switch access {
             case .read: args += ["--mode", "plan"]
             case .edit: break
@@ -77,9 +77,10 @@ enum ExternalAgentKind: String, CaseIterable, Sendable {
         switch self {
         case .claude, .cursor:
             // Claude: un objeto; Cursor: el último evento de tipo "result".
+            result.sessionID = objects.compactMap { $0["session_id"] as? String }.first
             guard let final = objects.last(where: { $0["result"] != nil || $0["type"] as? String == "result" }) else { break }
             result.text = final["result"] as? String
-            result.sessionID = final["session_id"] as? String
+            result.sessionID = final["session_id"] as? String ?? result.sessionID
             result.costUSD = final["total_cost_usd"] as? Double
             result.isError = final["is_error"] as? Bool ?? false
         case .grok:
@@ -110,6 +111,11 @@ enum ExternalAgentKind: String, CaseIterable, Sendable {
             var parts: [String] = []
             for event in objects {
                 result.sessionID = result.sessionID ?? event["sessionID"] as? String
+                if event["type"] as? String == "error" {
+                    result.isError = true
+                    let error = event["error"] as? [String: Any]
+                    result.text = error?["message"] as? String ?? "El agente informó un error."
+                }
                 guard let part = event["part"] as? [String: Any] else { continue }
                 if event["type"] as? String == "text", let text = part["text"] as? String {
                     let message = part["messageID"] as? String
@@ -118,7 +124,7 @@ enum ExternalAgentKind: String, CaseIterable, Sendable {
                 }
                 if let cost = part["cost"] as? Double { result.costUSD = (result.costUSD ?? 0) + cost }
             }
-            result.text = parts.isEmpty ? nil : parts.joined(separator: "\n")
+            if !parts.isEmpty { result.text = parts.joined(separator: "\n") }
         }
         return result
     }
@@ -206,10 +212,16 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
     let directory: URL
     let access: AgentAccess
     let model: String?
+    private let executablePath: String?
     @Published private(set) var status = Status.running
     @Published private(set) var task: String
     @Published private(set) var startedAt = Date()
     @Published private(set) var finishedAt: Date?
+    @Published private(set) var activities: [AgentActivity] = []
+    @Published private(set) var latestActivity = "Iniciando agente"
+    private var runID = UUID()
+    private var streamedOutput = ExternalAgentOutput()
+    private var streamedMessageID: String?
     private(set) var sessionID: String?
     private(set) var result: String?
     /// Suma de todas las corridas, si el CLI lo informa.
@@ -220,13 +232,14 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
     /// Una tarea de programación puede tardar bastante; más que esto es probable que esté trabado.
     private static let timeout: TimeInterval = 30 * 60
 
-    init(id: Int, kind: ExternalAgentKind, task: String, directory: URL, access: AgentAccess, model: String?) {
+    init(id: Int, kind: ExternalAgentKind, task: String, directory: URL, access: AgentAccess, model: String?, executablePath: String? = nil) {
         self.id = id
         self.kind = kind
         self.task = task
         self.directory = directory
         self.access = access
         self.model = model
+        self.executablePath = executablePath
     }
 
     var isRunning: Bool { status == .running }
@@ -238,8 +251,14 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
         finishedAt = nil
         result = nil
         errorText = nil
+        activities = []
+        latestActivity = kind == .grok ? "Trabajando · este CLI entrega el resultado al finalizar" : "Esperando eventos del agente"
+        runID = UUID()
+        let currentRun = runID
+        streamedOutput = ExternalAgentOutput()
+        streamedMessageID = nil
 
-        guard let path = kind.path else {
+        guard let path = executablePath ?? kind.path else {
             finish(exit: -1, output: "", errorOutput: "\(kind.displayName) no está instalado (no se encontró \(kind.executable) en el PATH).")
             return
         }
@@ -256,23 +275,50 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-        let output = OutputBuffer()
-        let errorOutput = OutputBuffer()
-        stdout.fileHandleForReading.readabilityHandler = { output.append($0.availableData) }
-        stderr.fileHandleForReading.readabilityHandler = { errorOutput.append($0.availableData) }
+        let output = OutputBuffer(maxBytes: 4_000_000)
+        let errorOutput = OutputBuffer(maxBytes: 64_000)
+        let readers = DispatchGroup()
         process.terminationHandler = { [weak self] finished in
-            // Margen para lo último que quedó en los pipes.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                stdout.fileHandleForReading.readabilityHandler = nil
-                stderr.fileHandleForReading.readabilityHandler = nil
+            // EOF en ambos pipes antes de procesar el resultado; no depende de una espera arbitraria.
+            readers.notify(queue: .main) {
                 MainActor.assumeIsolated {
+                    guard self?.runID == currentRun else { return }
                     self?.finish(exit: finished.terminationStatus, output: output.string, errorOutput: errorOutput.string)
                 }
             }
         }
         do {
+            readers.enter()
+            readers.enter()
             try process.run()
             self.process = process
+            // Lecturas bloqueantes fuera del hilo principal; cada lote mantiene su orden en main.
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                defer { readers.leave() }
+                var decoder = AgentLineDecoder()
+                while true {
+                    let data = stdout.fileHandleForReading.availableData
+                    output.append(data)
+                    let lines = decoder.append(data, eof: data.isEmpty)
+                    if !lines.isEmpty {
+                        DispatchQueue.main.async { [weak self] in
+                            MainActor.assumeIsolated {
+                                guard let self, self.runID == currentRun else { return }
+                                lines.forEach { self.consume($0) }
+                            }
+                        }
+                    }
+                    if data.isEmpty { break }
+                }
+            }
+            DispatchQueue.global(qos: .utility).async {
+                defer { readers.leave() }
+                while true {
+                    let data = stderr.fileHandleForReading.availableData
+                    if data.isEmpty { break }
+                    errorOutput.append(data)
+                }
+            }
             let pid = process.processIdentifier
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { [weak self] in
                 MainActor.assumeIsolated {
@@ -282,6 +328,8 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
                 }
             }
         } catch {
+            readers.leave()
+            readers.leave()
             finish(exit: -1, output: "", errorOutput: "No se pudo ejecutar: \(error.localizedDescription)")
         }
     }
@@ -289,26 +337,57 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
     func stop() {
         guard isRunning else { return }
         status = .stopped
+        latestActivity = "Deteniendo proceso"
         process?.terminate()
+    }
+
+    private func consume(_ line: String) {
+        let parsed = kind.parse(line)
+        streamedOutput.sessionID = parsed.sessionID ?? streamedOutput.sessionID
+        streamedOutput.isError = streamedOutput.isError || parsed.isError
+        if let cost = parsed.costUSD { streamedOutput.costUSD = kind == .opencode ? (streamedOutput.costUSD ?? 0) + cost : cost }
+        if let text = parsed.text {
+            if kind == .opencode {
+                let object = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
+                let part = object?["part"] as? [String: Any]
+                let messageID = part?["messageID"] as? String
+                if messageID != streamedMessageID { streamedOutput.text = nil; streamedMessageID = messageID }
+                streamedOutput.text = String(((streamedOutput.text ?? "") + text).suffix(100_000))
+            } else {
+                streamedOutput.text = String(text.suffix(100_000))
+            }
+        }
+        sessionID = streamedOutput.sessionID ?? sessionID
+        guard let event = AgentActivity.decode(line), activities.last?.text != event.text || activities.last?.isError != event.isError else { return }
+        activities.append(event)
+        if activities.count > 40 { activities.removeFirst(activities.count - 40) }
+        latestActivity = event.text
     }
 
     private func finish(exit: Int32, output: String, errorOutput: String) {
         process = nil
         finishedAt = Date()
-        let parsed = kind.parse(output)
+        var parsed = kind.parse(output)
+        parsed.sessionID = streamedOutput.sessionID ?? parsed.sessionID
+        parsed.text = streamedOutput.text ?? parsed.text
+        parsed.costUSD = streamedOutput.costUSD ?? parsed.costUSD
+        parsed.isError = parsed.isError || streamedOutput.isError
         sessionID = parsed.sessionID ?? sessionID
         if let cost = parsed.costUSD { costUSD = (costUSD ?? 0) + cost }
         result = parsed.text
-        if status == .stopped { return }
+        if status == .stopped { latestActivity = "Detenido"; return }
         if exit == 0, !parsed.isError, parsed.text != nil {
             status = .finished
+            latestActivity = "Terminado"
         } else {
             status = .failed
+            latestActivity = "Falló"
             let detail = errorOutput.trimmingCharacters(in: .whitespacesAndNewlines)
             errorText = errorText ?? "Código de salida \(exit)." + (detail.isEmpty ? "" : "\n\(detail.suffix(1500))")
             // Sin respuesta parseable: lo último que imprimió sirve para entender qué pasó.
             if result == nil, !output.isEmpty { result = String(output.suffix(3000)) }
         }
+        LocalDiagnostics.shared.record(status == .failed ? .agentFailed : .agentFinished, value: Date().timeIntervalSince(startedAt))
     }
 
     /// Para el modelo: estado, duración, costo y respuesta.
@@ -324,6 +403,8 @@ final class ExternalAgentJob: ObservableObject, Identifiable {
         if let costUSD { header += String(format: " Costo acumulado: %.4f USD.", costUSD) }
         if sessionID != nil, !isRunning { header += " Se puede seguir con agent_send." }
         var text = header
+        if isRunning { text += "\nActividad: \(latestActivity)" }
+        if !activities.isEmpty { text += "\nEventos recientes:\n" + activities.suffix(8).map(\.text).joined(separator: "\n") }
         if let errorText { text += "\nError: \(errorText)" }
         if let result { text += "\nRespuesta:\n\(result.prefix(12_000))" }
         return text
@@ -366,6 +447,7 @@ final class ExternalAgents: ObservableObject {
 
     /// Quita de la lista los que ya terminaron.
     func clearFinished() {
+        for job in jobs where !job.isRunning { observers[job.id] = nil }
         jobs.removeAll { !$0.isRunning }
     }
 }

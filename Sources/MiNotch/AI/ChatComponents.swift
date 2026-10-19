@@ -138,6 +138,7 @@ struct ApprovalCard: View {
 struct TerminalHost: NSViewRepresentable {
     let shell: TabShell
     let directory: URL
+    @AppStorage("terminalFontSize") private var fontSize = 12.0
 
     func makeNSView(context: Context) -> TerminalContainer {
         shell.startIfNeeded(in: directory)
@@ -146,7 +147,10 @@ struct TerminalHost: NSViewRepresentable {
         return container
     }
 
-    func updateNSView(_ container: TerminalContainer, context: Context) {}
+    func updateNSView(_ container: TerminalContainer, context: Context) {
+        let size = min(max(fontSize, 10), 24)
+        if shell.view.font.pointSize != size { shell.view.font = .monospacedSystemFont(ofSize: size, weight: .regular) }
+    }
 
     func makeCoordinator() -> TabShell { shell }
 

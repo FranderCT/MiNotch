@@ -570,20 +570,6 @@ struct ToolError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// Salida de un comando, escrita desde el hilo del pipe y leída al terminar.
-final class OutputBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-
-    func append(_ chunk: Data) {
-        lock.withLock { data.append(chunk) }
-    }
-
-    var string: String {
-        lock.withLock { String(decoding: data, as: UTF8.self) }
-    }
-}
-
 /// Definición de una herramienta en el formato de la API (todos los parámetros son texto).
 struct ToolDefinition: Encodable, Sendable {
     struct Function: Encodable, Sendable {

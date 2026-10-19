@@ -59,6 +59,10 @@ struct DirectoryMenu: View {
             if !others.isEmpty { Divider() }
             Button("Elegir carpeta…", action: workspace.chooseDirectory)
             Button("Mostrar en Finder", action: workspace.revealInFinder)
+            Button("Copiar enlace de esta carpeta") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(ProjectLink.url(for: workspace.directory).absoluteString, forType: .string)
+            }
         } label: {
             Label(showsPath ? workspace.displayPath : workspace.directory.lastPathComponent, systemImage: "folder")
                 .lineLimit(1)
@@ -105,6 +109,8 @@ struct AgentsMenu: View {
             ForEach(agents.jobs, id: \.id) { job in
                 Menu("\(job.id) · \(job.kind.displayName) · \(Self.statusText(job))") {
                     Text(job.task.prefix(80))
+                    Text(job.latestActivity)
+                    ForEach(job.activities.suffix(8)) { event in Text(event.text) }
                     if job.isRunning {
                         Button("Detener", action: job.stop)
                     } else if let result = job.result {
@@ -134,6 +140,47 @@ struct AgentsMenu: View {
         case .failed: "falló"
         case .stopped: "detenido"
         }
+    }
+}
+
+/// Actividad visible sin abrir el menú; los detalles y la detención pertenecen a cada trabajo.
+struct AgentActivityRow: View {
+    @ObservedObject var job: ExternalAgentJob
+
+    var body: some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(job.activities.suffix(8)) { event in
+                    Text(event.text)
+                        .foregroundStyle(event.isError ? Color.red : Color.secondary)
+                }
+                if job.isRunning { Button("Detener", action: job.stop).buttonStyle(.borderless) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: job.isRunning ? "cpu" : "exclamationmark.circle")
+                Text("\(job.kind.displayName) · \(job.latestActivity)")
+                    .lineLimit(1)
+            }
+            .foregroundStyle(job.status == .failed ? Color.red : AITheme.cyan)
+        }
+        .font(.system(size: 10, design: .monospaced))
+    }
+}
+
+struct ShellStatusView: View {
+    @ObservedObject var shell: TabShell
+
+    var body: some View {
+        Text(shell.isRunning ? shell.commandState.summary : "Shell cerrado")
+            .font(.system(size: 10, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 4)
+            .accessibilityLabel("Estado de terminal")
+            .accessibilityValue(shell.commandState.summary)
     }
 }
 

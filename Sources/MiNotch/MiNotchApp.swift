@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.servicesProvider = self
         setupStatusItem()
         setupMainMenu()
         handleTerminationSignal()
@@ -59,6 +60,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.applyInterfaceMode(opening: true)
             }
         }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let directories = urls.compactMap(ProjectLink.directory)
+        guard directories.count == urls.count else {
+            showOpenError("El enlace debe indicar una carpeta existente: minotch://open?path=/ruta/de/la/carpeta")
+            return
+        }
+        if let error = openProjects(directories) { showOpenError(error) }
+    }
+
+    @objc func openFolder(_ pasteboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        var urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        if urls.isEmpty, let paths = pasteboard.propertyList(forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String] {
+            urls = paths.map { URL(fileURLWithPath: $0) }
+        }
+        let directories = urls.compactMap(ProjectLink.directory)
+        guard !directories.isEmpty, directories.count == urls.count else {
+            error.pointee = "Seleccioná una o más carpetas existentes." as NSString
+            return
+        }
+        if let message = openProjects(directories) { error.pointee = message as NSString }
+    }
+
+    private func openProjects(_ directories: [URL]) -> String? {
+        guard !directories.isEmpty else { return nil }
+        let unique = Array(Set(directories)).sorted { $0.path < $1.path }
+        let new = unique.filter { directory in
+            !tabs.tabs.contains { $0.workspace.directory.resolvingSymlinksInPath() == directory }
+        }
+        guard tabs.tabs.count + new.count <= ChatTabs.maxTabs else {
+            return "No hay suficientes pestañas disponibles. Cerrá alguna antes de abrir estas carpetas (máximo \(ChatTabs.maxTabs))."
+        }
+        for directory in unique {
+            if let existing = tabs.tabs.first(where: { $0.workspace.directory.resolvingSymlinksInPath() == directory }) {
+                tabs.select(existing.id)
+            } else {
+                tabs.newTab(directory: directory, title: nil, select: true)
+            }
+        }
+        showMainWindow()
+        return nil
+    }
+
+    private func showOpenError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "No se pudo abrir la carpeta"
+        alert.informativeText = message
+        NSApp.activate()
+        alert.runModal()
     }
 
     /// Prende o apaga el notch (paneles y seguimiento del mouse) y la ventana según `interfaceMode`.
@@ -204,7 +255,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showMainWindow() {
         // Desde el notch en "solo notch": pasa a "notch y ventana" (al cambiar el ajuste se abre la ventana).
         if !interfaceMode.usesWindow {
+            interfaceMode = .both
             UserDefaults.standard.set(InterfaceMode.both.rawValue, forKey: InterfaceMode.defaultsKey)
+            applyInterfaceMode(opening: true)
         } else {
             mainWindow.show()
         }
