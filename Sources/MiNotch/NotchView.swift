@@ -44,8 +44,20 @@ struct NotchView: View {
     @ObservedObject var tabs: ChatTabs
     @ObservedObject var layout: ChatLayoutState
 
+    /// Cerrado: un punto de estado como los de la barra lateral (rosa si espera al usuario, cian si responde).
+    private var indicator: Color? {
+        if !tabs.needingAttention.isEmpty { return AITheme.pink }
+        return tabs.isAnyWorking ? AITheme.cyan : nil
+    }
+
+    /// Ancho extra de la píldora cerrada para que el punto se vea al lado del notch físico.
+    private static let indicatorWidth: CGFloat = 28
+
     private var size: CGSize {
-        state.isExpanded ? state.expandedSize : state.collapsedSize
+        if state.isExpanded { return state.expandedSize }
+        var size = state.collapsedSize
+        if indicator != nil { size.width += Self.indicatorWidth }
+        return size
     }
 
     private var cornerRadius: CGFloat {
@@ -63,32 +75,40 @@ struct NotchView: View {
 
     var body: some View {
         shape
-        .fill(.black)
+        // Cerrada, negra para fundirse con el notch físico; abierta, con el fondo de la ventana.
+        .fill(state.isExpanded ? AITheme.background : .black)
         .overlay(alignment: .top) {
             if state.isExpanded {
+                // La misma interfaz que la ventana, a escala.
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
-                ZStack(alignment: .top) {
-                    AIBackgroundTint()
-                    // La misma interfaz que la ventana, a escala.
-                    MainChatView(tabs: tabs, layout: layout, style: .notch(topInset: state.collapsedSize.height), showsWindowButton: true)
-                        // Lejos de las esquinas inferiores redondeadas.
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 12)
-                }
-                .frame(width: state.expandedSize.width, height: state.expandedSize.height)
-                .transition(.opacity)
+                MainChatView(tabs: tabs, layout: layout, style: .notch(topInset: state.collapsedSize.height), showsWindowButton: true)
+                    // Lejos de las esquinas inferiores redondeadas.
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                    .frame(width: state.expandedSize.width, height: state.expandedSize.height)
+                    .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if !state.isExpanded, let indicator {
+                // Estático: no consume CPU mientras responde.
+                Circle()
+                    .fill(indicator)
+                    .frame(width: 7, height: 7)
+                    .padding(.trailing, 11)
+                    .transition(.opacity)
             }
         }
         .clipShape(shape)
         .overlay {
-            // Siempre con colores de IA. Estático en reposo (0 % de CPU); gira mientras responde.
-            // Quieto mientras espera al usuario (aprobación o contraseña): puede ser mucho rato.
-            GlowBorder(shape: shape, isAnimating: tabs.isAnyWorking)
-                .opacity(tabs.isAnyWorking ? 1 : 0.75)
+            if state.isExpanded {
+                shape.stroke(AITheme.border, lineWidth: 1)
+            }
         }
         .frame(width: size.width, height: size.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.72), value: state.isExpanded)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.expandedSize)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: indicator)
     }
 }

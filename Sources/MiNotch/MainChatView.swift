@@ -271,7 +271,6 @@ private struct ChatColumn: View {
     let style: ChatStyle
 
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
-    @FocusState private var isInputFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -282,6 +281,9 @@ private struct ChatColumn: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .padding(style.isNotch ? 6 : 8)
                 ShellStatusView(shell: chat.shell)
+                TerminalInputComposer(shell: chat.shell, directory: workspace.directory, fontSize: style.fontSize)
+                    .padding(.horizontal, style.isNotch ? 10 : 16)
+                    .padding(.vertical, 8)
             } else if account.hasAPIKey {
                 transcript
             } else {
@@ -316,11 +318,6 @@ private struct ChatColumn: View {
             account.refreshBalanceIfNeeded()
             // La rama pudo cambiar desde otra terminal mientras estaba cerrado.
             workspace.refreshGit()
-            isInputFocused = true
-        }
-        .onChange(of: chat.isReadingImage) {
-            // Recién adjuntada: listo para escribir la pregunta.
-            if chat.isReadingImage { isInputFocused = true }
         }
     }
 
@@ -428,12 +425,20 @@ private struct ChatColumn: View {
             Text("❯")
                 .font(.system(size: style.fontSize + 1, weight: .bold, design: .monospaced))
                 .foregroundStyle(AITheme.accent)
-            TextField(hasImage ? "¿Qué querés saber de la imagen? (Enter = explicar)" : "Pedile algo a DeepSeek…", text: $chat.input)
-                .textFieldStyle(.plain)
-                .font(style.mono)
-                .focused($isInputFocused)
-                .onSubmit { chat.send() }
-                .disabled(!account.hasAPIKey)
+            PredictiveComposer(
+                text: $chat.input,
+                suggestions: InputPredictions.suggestions(
+                    for: chat.input,
+                    history: chat.messages.filter { $0.role == .user && $0.fromTab == nil }.map(\.text),
+                    candidates: InputPredictions.prompts,
+                    caseInsensitive: true
+                ),
+                placeholder: hasImage ? "¿Qué querés saber de la imagen?" : "Pedile algo a DeepSeek…",
+                fontSize: style.fontSize,
+                isEnabled: account.hasAPIKey,
+                onCancel: { if chat.isStreaming { chat.stop() } },
+                onSubmit: { chat.send() }
+            )
             Button { ImageAttachment.pick(into: chat) } label: {
                 Image(systemName: "photo.badge.plus")
             }

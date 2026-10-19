@@ -56,7 +56,7 @@ final class MainWindowController: NSObject, NSWindowDelegate {
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.contentView = NSHostingView(rootView: MainChatView(tabs: tabs, layout: layout, style: .window)
-                .background(Color(white: 0.055)))
+                .background(AITheme.background))
             window.center()
             // Recuerda tamaño y posición entre usos.
             window.setFrameAutosaveName("MiNotchWindow")

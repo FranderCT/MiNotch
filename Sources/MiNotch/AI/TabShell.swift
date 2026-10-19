@@ -10,6 +10,10 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     @Published private(set) var isRunning = false
     @Published private(set) var exitCode: Int32?
     @Published private(set) var commandState = ShellCommandState()
+    @Published var draft = ""
+    @Published private(set) var inputHistory: [String] = []
+    @Published private(set) var isEditingDirectly = false
+    @Published private(set) var inputError: String?
     private var integration: ShellIntegration?
     /// Momento del último envío del asistente: la salida posterior es su respuesta.
     private var lastSentAt = Date.distantPast
@@ -26,6 +30,10 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         view.nativeForegroundColor = NSColor(white: 0.92, alpha: 1)
         view.caretColor = NSColor(AITheme.violet)
         view.optionAsMetaKey = false
+        view.onDirectInput = { [weak self] in
+            guard let self, self.commandState.phase == .ready else { return }
+            self.isEditingDirectly = true
+        }
     }
 
     func startIfNeeded(in directory: URL) {
@@ -40,7 +48,12 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
             let token = integration!.token
             view.getTerminal().registerOscHandler(code: ShellIntegration.oscCode) { [weak self] bytes in
                 MainActor.assumeIsolated {
-                    self?.commandState.receive(String(decoding: bytes, as: UTF8.self), token: token)
+                    guard let self else { return }
+                    let payload = String(decoding: bytes, as: UTF8.self)
+                    self.commandState.receive(payload, token: token)
+                    if payload.hasPrefix("\(token);ready;"), self.commandState.phase == .ready {
+                        self.isEditingDirectly = false
+                    }
                 }
             }
         } catch {
@@ -60,6 +73,7 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
 
     /// Para cerrar la pestaña o la app: SIGHUP como al cerrar una ventana de Terminal (corta también ssh).
     func terminate() {
+        view.stopInputMonitor()
         guard isRunning else { return }
         if view.process.shellPid != 0 { kill(view.process.shellPid, SIGHUP) }
         view.terminate()
@@ -86,6 +100,31 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     }
 
     // MARK: - Uso desde el asistente
+
+    /// El editor solo envía al prompt confirmado, nunca a un programa o una contraseña.
+    func submitDraft(in directory: URL) {
+        guard isRunning, commandState.phase == .ready, !isEditingDirectly,
+              !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let command = draft
+        guard !command.unicodeScalars.contains(where: { ($0.value < 32 && $0 != "\n" && $0 != "\t") || $0.value == 127 }) else {
+            inputError = "Quitá los caracteres de control antes de enviar el comando."
+            return
+        }
+        let bracketed = view.getTerminal().bracketedPasteMode
+        guard bracketed || !command.contains("\n") else {
+            inputError = "Este shell no admite el pegado multilínea; enviá una sola línea."
+            return
+        }
+        inputError = nil
+        draft = ""
+        inputHistory.removeAll { $0 == command }
+        inputHistory.append(command)
+        inputHistory = Array(inputHistory.suffix(100))
+        // Reservar el prompt antes de lanzar la tarea evita un segundo envío por doble Enter.
+        commandState.phase = .awaitingInput
+        let input = bracketed ? "\u{1b}[200~" + command + "\u{1b}[201~\r" : command + "\r"
+        Task { await write(input, in: directory) }
+    }
 
     /// Texto tal cual: incluir "\r" para Enter o "\u{03}" para Ctrl+C.
     func write(_ text: String, in directory: URL) async {
@@ -161,6 +200,38 @@ final class TerminalContainer: NSView {
 
 /// La vista de SwiftTerm, con lo que necesita el notch.
 final class ShellTerminalView: LocalProcessTerminalView {
+    var onDirectInput: (() -> Void)?
+    private var inputMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stopInputMonitor()
+        guard window != nil else { return }
+        inputMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                if let self, self.window?.firstResponder === self,
+                   !event.modifierFlags.contains(.command) {
+                    self.onDirectInput?()
+                }
+            }
+            return event
+        }
+    }
+
+    func stopInputMonitor() {
+        if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
+        inputMonitor = nil
+    }
+
+    override func paste(_ sender: Any) {
+        onDirectInput?()
+        super.paste(sender)
+    }
+
+    override func insertText(_ string: Any, replacementRange: NSRange) {
+        onDirectInput?()
+        super.insertText(string, replacementRange: replacementRange)
+    }
     /// Para saber cuándo un comando terminó de responder.
     private(set) var lastOutputAt = Date.distantPast
 
