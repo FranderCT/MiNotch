@@ -38,5 +38,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP"
+# Firma con un certificado fijo para que macOS recuerde los permisos (Grabación de pantalla)
+# entre compilaciones; con la firma ad-hoc ("-") cada build cuenta como una app nueva.
+IDENTITY=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ { print $2; exit }')
+if [[ -z "$IDENTITY" ]]; then
+    echo "Aviso: no hay certificado Apple Development; firma ad-hoc (los permisos se piden de nuevo en cada build)."
+    IDENTITY="-"
+fi
+codesign --force --sign "$IDENTITY" "$APP"
 echo "Listo: $(pwd)/$APP"

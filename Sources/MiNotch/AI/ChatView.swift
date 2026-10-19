@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Contenido del notch expandido: encabezado, conversación y campo de texto.
 struct ChatView: View {
@@ -8,6 +10,8 @@ struct ChatView: View {
 
     @AppStorage(DeepSeekClient.modelDefaultsKey) private var model = DeepSeekClient.defaultModel
     @FocusState private var isInputFocused: Bool
+    /// Una imagen arrastrada está sobre el notch. Vive en NotchState: las Command Line Tools no incluyen la macro `@State`.
+    @Binding var isDropTargeted: Bool
 
     var body: some View {
         VStack(spacing: 10) {
@@ -19,8 +23,11 @@ struct ChatView: View {
             } else {
                 missingKey
             }
-            if let screenText = chat.screenContext {
-                ScreenTextChip(text: screenText, onRemove: chat.discardScreenContext)
+            if chat.isReadingImage {
+                ReadingImageChip()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let imageText = chat.imageText {
+                ImageTextChip(text: imageText, wasTrimmed: chat.imageTextWasTrimmed, onRemove: chat.discardImageText)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             inputBar
@@ -28,10 +35,52 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
         .foregroundStyle(.white)
-        .onAppear {
-            chat.refreshBalanceIfNeeded()
-            // Recién capturado: listo para escribir la pregunta.
-            if chat.screenContext != nil { isInputFocused = true }
+        .overlay {
+            if isDropTargeted {
+                DropHint()
+            }
+        }
+        .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: attachDroppedImage)
+        .onAppear { chat.refreshBalanceIfNeeded() }
+        .onChange(of: chat.isReadingImage) {
+            // Recién adjuntada: listo para escribir la pregunta.
+            if chat.isReadingImage { isInputFocused = true }
+        }
+    }
+
+    // MARK: - Imagen adjunta
+
+    /// La miniatura de una captura (⌘⇧4), un archivo de Finder o una imagen arrastrada desde otra app.
+    private func attachDroppedImage(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        let chat = chat
+
+        if provider.canLoadObject(ofClass: URL.self) {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in chat.attachImage(at: url) }
+            }
+        } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                let image = data.flatMap { ImageTextReader.image(from: $0) }
+                Task { @MainActor in chat.attachImage(image) }
+            }
+        } else {
+            return false
+        }
+
+        // Teclado listo para la pregunta: la píldora queda abierta mientras se escribe.
+        NSApp.windows.first { $0 is NotchPanel && $0.frame.contains(NSEvent.mouseLocation) }?.makeKey()
+        return true
+    }
+
+    private func pickImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.message = "Elegí una imagen: extraigo su texto para preguntarle a DeepSeek."
+        NSApp.activate()
+        if panel.runModal() == .OK, let url = panel.url {
+            chat.attachImage(at: url)
         }
     }
 
@@ -155,21 +204,21 @@ struct ChatView: View {
 
     private var inputBar: some View {
         let isEmpty = chat.input.trimmingCharacters(in: .whitespaces).isEmpty
-        let hasScreenText = chat.screenContext != nil
-        let canPress = chat.isStreaming || !isEmpty || hasScreenText
+        let hasImage = chat.imageText != nil || chat.isReadingImage
+        let canPress = chat.isStreaming || (!chat.isReadingImage && (!isEmpty || hasImage))
 
         return HStack(spacing: 8) {
-            Button(action: chat.captureScreen) {
-                Image(systemName: "text.viewfinder")
+            Button(action: pickImage) {
+                Image(systemName: "photo.badge.plus")
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.75))
             }
             .buttonStyle(.plain)
-            .disabled(!chat.hasAPIKey || chat.isStreaming || chat.isCapturing)
-            .help("Preguntar sobre la pantalla: elegí una zona y extraigo su texto")
-            .accessibilityLabel("Preguntar sobre la pantalla")
+            .disabled(!chat.hasAPIKey || chat.isReadingImage)
+            .help("Adjuntar una imagen (o arrastrala acá, o pegala con ⌘V): extraigo su texto")
+            .accessibilityLabel("Adjuntar imagen")
 
-            TextField(hasScreenText ? "¿Qué querés saber? (Enter = explicar)" : "Preguntale a DeepSeek…", text: $chat.input)
+            TextField(hasImage ? "¿Qué querés saber de la imagen? (Enter = explicar)" : "Preguntale a DeepSeek…", text: $chat.input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($isInputFocused)
@@ -208,8 +257,8 @@ private struct MessageRow: View {
         switch message.role {
         case .user:
             VStack(alignment: .trailing, spacing: 4) {
-                if let screenText = message.screenText {
-                    ScreenTextChip(text: screenText)
+                if let imageText = message.imageText {
+                    ImageTextChip(text: imageText)
                 }
                 Text(message.text)
                     .padding(.horizontal, 12)
@@ -256,9 +305,10 @@ private struct MessageRow: View {
     }
 }
 
-/// Texto de pantalla adjunto a una pregunta: muestra el comienzo y el tooltip, un fragmento más largo.
-private struct ScreenTextChip: View {
+/// Texto de una imagen adjunta a una pregunta: muestra el comienzo y el tooltip, un fragmento más largo.
+private struct ImageTextChip: View {
     let text: String
+    var wasTrimmed = false
     /// Solo en el chip pendiente de enviar: quita el texto adjunto.
     var onRemove: (() -> Void)?
 
@@ -268,17 +318,23 @@ private struct ScreenTextChip: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "text.viewfinder")
+            Image(systemName: "photo")
                 .foregroundStyle(AITheme.accent)
             Text("“\(preview)”")
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if wasTrimmed {
+                Text("· recortado")
+                    .foregroundStyle(AITheme.pink)
+                    .fixedSize()
+                    .help("La imagen superaba \(ChatSession.imageTextLimit.formatted()) caracteres de texto: solo se envía el comienzo.")
+            }
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Quitar texto de pantalla")
+                .accessibilityLabel("Quitar imagen adjunta")
             }
         }
         .font(.system(size: 10, weight: .medium))
@@ -286,7 +342,39 @@ private struct ScreenTextChip: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(.white.opacity(0.08), in: Capsule())
-        .help("Texto de pantalla (\(text.count) caracteres):\n\(text.prefix(600))")
+        .help("Texto de la imagen (\(text.count) caracteres):\n\(text.prefix(600))")
+    }
+}
+
+/// Mientras Vision extrae el texto (la primera vez en el sistema puede tardar un rato).
+private struct ReadingImageChip: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.mini)
+            Text("Leyendo texto de la imagen…")
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.white.opacity(0.75))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(.white.opacity(0.08), in: Capsule())
+    }
+}
+
+/// Aviso mientras se arrastra una imagen sobre el notch.
+private struct DropHint: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .strokeBorder(AITheme.accent, style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+            .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                Label("Soltá la imagen para leer su texto", systemImage: "photo.badge.plus")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
+            .allowsHitTesting(false)
     }
 }
 

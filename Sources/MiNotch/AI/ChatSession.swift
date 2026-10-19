@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 struct ChatMessage: Identifiable, Sendable {
@@ -10,16 +11,16 @@ struct ChatMessage: Identifiable, Sendable {
     var text: String
     var usage: ConsultationUsage?
     var isComplete = false
-    /// Texto extraído de la pantalla que acompaña a la pregunta.
-    var screenText: String?
+    /// Texto extraído de la imagen adjunta a la pregunta.
+    var imageText: String?
 
-    /// Lo que recibe DeepSeek: la pregunta y, si hay, el texto de la pantalla.
+    /// Lo que recibe DeepSeek: la pregunta y, si hay, el texto de la imagen.
     var apiContent: String {
-        guard let screenText else { return text }
+        guard let imageText else { return text }
         return """
-            Texto capturado de mi pantalla (extraído con OCR, puede tener errores):
+            Texto de una imagen que adjunté, como una captura de pantalla (extraído con OCR, puede tener errores):
             \"\"\"
-            \(screenText)
+            \(imageText)
             \"\"\"
 
             \(text)
@@ -35,9 +36,15 @@ final class ChatSession: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var errorMessage: String?
     @Published private(set) var hasAPIKey = false
-    /// Texto capturado de la pantalla, pendiente de enviarse con la próxima pregunta.
-    @Published private(set) var screenContext: String?
-    @Published private(set) var isCapturing = false
+    /// Texto de la imagen adjunta, pendiente de enviarse con la próxima pregunta.
+    @Published private(set) var imageText: String?
+    /// La imagen tenía más de `imageTextLimit` caracteres y se recortó.
+    @Published private(set) var imageTextWasTrimmed = false
+    /// Vision extrayendo el texto de la imagen adjunta.
+    @Published private(set) var isReadingImage = false
+
+    /// Tope por imagen: una captura llena de texto puede costar miles de tokens.
+    static let imageTextLimit = 15_000
 
     @Published private(set) var balance: DeepSeekBalance?
     @Published private(set) var balanceError: String?
@@ -49,10 +56,6 @@ final class ChatSession: ObservableObject {
 
     /// Lo define AppDelegate: abre la ventana de configuración.
     var onOpenSettings: (() -> Void)?
-    /// Los define AppDelegate: esconden las píldoras mientras se elige la zona y las vuelven a mostrar
-    /// (con el chat abierto si hay algo que ver).
-    var onCaptureStart: (() -> Void)?
-    var onCaptureEnd: ((_ showChat: Bool) -> Void)?
 
     /// Copia en memoria de la key: se lee al consultar saldo o enviar un mensaje.
     private var apiKey: String?
@@ -136,52 +139,58 @@ final class ChatSession: ObservableObject {
         }
     }
 
-    // MARK: - Pantalla
+    // MARK: - Imagen adjunta
 
-    func captureScreen() {
+    func attachImage(at url: URL) {
+        attachImage(ImageTextReader.image(at: url))
+    }
+
+    /// nil: lo que llegó no se pudo abrir como imagen.
+    func attachImage(_ image: CGImage?) {
         guard hasAPIKey else {
             openSettings()
             return
         }
-        guard !isCapturing, !isStreaming else { return }
-        isCapturing = true
-        onCaptureStart?()
+        guard let image else {
+            errorMessage = ImageTextReader.Failure.unreadableImage.localizedDescription
+            return
+        }
+        guard !isReadingImage else { return }
+        isReadingImage = true
+        errorMessage = nil
 
         Task {
-            var showChat = true
             do {
-                if let text = try await ScreenTextCapture.captureText() {
-                    screenContext = text
-                    errorMessage = nil
-                } else {
-                    showChat = false
-                }
+                let text = try await ImageTextReader.recognizeText(in: image)
+                imageTextWasTrimmed = text.count > Self.imageTextLimit
+                imageText = String(text.prefix(Self.imageTextLimit))
             } catch {
                 errorMessage = error.localizedDescription
             }
-            isCapturing = false
-            onCaptureEnd?(showChat)
+            isReadingImage = false
         }
     }
 
-    func discardScreenContext() {
-        screenContext = nil
+    func discardImageText() {
+        imageText = nil
+        imageTextWasTrimmed = false
     }
 
     // MARK: - Chat
 
     func send() {
         var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let screenText = screenContext
-        if text.isEmpty, screenText != nil {
+        let imageText = imageText
+        if text.isEmpty, imageText != nil {
             text = "Explicame este texto."
         }
-        guard !text.isEmpty, !isStreaming, hasAPIKey else { return }
+        // Mientras se lee la imagen, esperar: si no, la pregunta saldría sin el texto.
+        guard !text.isEmpty, !isStreaming, !isReadingImage, hasAPIKey else { return }
 
         input = ""
-        screenContext = nil
+        discardImageText()
         errorMessage = nil
-        messages.append(ChatMessage(role: .user, text: text, screenText: screenText))
+        messages.append(ChatMessage(role: .user, text: text, imageText: imageText))
         let history = messages
         messages.append(ChatMessage(role: .assistant, text: ""))
         let replyID = messages.last!.id

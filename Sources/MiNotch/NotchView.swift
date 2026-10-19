@@ -9,6 +9,7 @@ final class NotchState: ObservableObject {
     static let gapToWindows: CGFloat = 4
 
     @Published var isExpanded = false
+    @Published var isDropTargeted = false
     /// Se ajusta a la altura de la barra de menú de la pantalla actual.
     @Published var collapsedSize = CGSize(width: collapsedWidth, height: 26)
 
@@ -57,7 +58,7 @@ struct NotchView: View {
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
                 ZStack(alignment: .top) {
                     AIBackgroundTint()
-                    ChatView(chat: chat, topInset: state.collapsedSize.height)
+                    ChatView(chat: chat, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
                 }
                 .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
                 .transition(.opacity)
