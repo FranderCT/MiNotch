@@ -1,0 +1,15 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# App generada por build-app.sh
+MiNotch.app/
+
+# Xcode (si se abre el paquete con Xcode)
+xcuserdata/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS
+.DS_Store
