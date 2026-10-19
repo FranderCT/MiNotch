@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// Contenido del notch expandido: encabezado, conversación y campo de texto.
 struct ChatView: View {
     @ObservedObject var chat: ChatSession
+    @ObservedObject var workspace: Workspace
     /// Alto de la franja superior (barra de menú o notch físico); ahí va el encabezado.
     let topInset: CGFloat
 
@@ -18,10 +19,13 @@ struct ChatView: View {
             header
                 .frame(height: topInset)
             if chat.hasAPIKey {
-                balanceBar
+                statusBar
                 conversation
             } else {
                 missingKey
+            }
+            if let approval = chat.pendingApproval {
+                ApprovalCard(approval: approval, onDecide: chat.resolveApproval)
             }
             if chat.isReadingImage {
                 ReadingImageChip()
@@ -115,6 +119,14 @@ struct ChatView: View {
         .padding(.horizontal, 6)
     }
 
+    /// Sin los pasos del asistente que solo pidieron herramientas: esas se ven como filas propias.
+    private var visibleMessages: [ChatMessage] {
+        chat.messages.filter { message in
+            message.role != .assistant || !message.text.isEmpty
+                || (chat.isStreaming && message.id == chat.messages.last?.id)
+        }
+    }
+
     @ViewBuilder
     private var conversation: some View {
         if chat.messages.isEmpty && chat.errorMessage == nil {
@@ -123,8 +135,8 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(chat.messages) { message in
-                            MessageRow(message: message, isStreaming: chat.isStreaming)
+                        ForEach(visibleMessages) { message in
+                            MessageRow(message: message, isActive: chat.isStreaming && message.id == chat.messages.last?.id)
                                 .id(message.id)
                         }
                         if let error = chat.errorMessage {
@@ -135,8 +147,8 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .scrollIndicators(.never)
-                .onChange(of: chat.messages.last?.text) {
-                    if let id = chat.messages.last?.id {
+                .onChange(of: "\(chat.messages.count)\(chat.messages.last?.text.count ?? 0)") {
+                    if let id = visibleMessages.last?.id {
                         proxy.scrollTo(id, anchor: .bottom)
                     }
                 }
@@ -145,7 +157,38 @@ struct ChatView: View {
         }
     }
 
-    private var balanceBar: some View {
+    /// Carpeta de trabajo (con menú para cambiarla) y saldo de DeepSeek.
+    private var statusBar: some View {
+        HStack(spacing: 10) {
+            directoryMenu
+            Spacer(minLength: 0)
+            balance
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.white.opacity(0.65))
+    }
+
+    private var directoryMenu: some View {
+        Menu {
+            let others = workspace.recents.filter { $0.path != workspace.directory.path }
+            ForEach(others, id: \.path) { url in
+                Button((url.path as NSString).abbreviatingWithTildeInPath) { workspace.move(to: url) }
+            }
+            if !others.isEmpty { Divider() }
+            Button("Elegir carpeta…", action: workspace.chooseDirectory)
+            Button("Mostrar en Finder", action: workspace.revealInFinder)
+        } label: {
+            Label(workspace.directory.lastPathComponent, systemImage: "folder")
+                .lineLimit(1)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        // Cambiar de carpeta a mitad de una respuesta confundiría al asistente.
+        .disabled(chat.isStreaming)
+        .help("Carpeta de trabajo del asistente: \(workspace.displayPath)")
+    }
+
+    private var balance: some View {
         HStack(spacing: 6) {
             Image(systemName: "wallet.bifold")
             Text(chat.balance.map { "Saldo: \($0.summary)" } ?? (chat.isRefreshingBalance ? "Consultando saldo…" : "Saldo no disponible"))
@@ -163,8 +206,6 @@ struct ChatView: View {
             .disabled(chat.isRefreshingBalance)
             .accessibilityLabel("Actualizar saldo de DeepSeek")
         }
-        .font(.system(size: 10, weight: .medium))
-        .foregroundStyle(.white.opacity(0.65))
         .help(chat.balanceError.map { "No se pudo actualizar: \($0). El saldo mostrado puede estar desactualizado." }
               ?? "Saldo de tu cuenta DeepSeek. Se actualiza al abrir el chat y después de cada consulta.")
     }
@@ -176,9 +217,10 @@ struct ChatView: View {
                 .foregroundStyle(AITheme.accent)
             Text("¿En qué te ayudo?")
                 .font(.system(size: 15, weight: .semibold))
-            Text("Escribí abajo y apretá Enter")
+            Text("Trabajo en \(workspace.directory.lastPathComponent): leo, creo y edito archivos y ejecuto comandos (con tu aprobación).")
                 .font(.system(size: 11))
                 .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -218,7 +260,7 @@ struct ChatView: View {
             .help("Adjuntar una imagen (o arrastrala acá, o pegala con ⌘V): extraigo su texto")
             .accessibilityLabel("Adjuntar imagen")
 
-            TextField(hasImage ? "¿Qué querés saber de la imagen? (Enter = explicar)" : "Preguntale a DeepSeek…", text: $chat.input)
+            TextField(hasImage ? "¿Qué querés saber de la imagen? (Enter = explicar)" : "Pedile algo a DeepSeek…", text: $chat.input)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($isInputFocused)
@@ -251,7 +293,8 @@ struct ChatView: View {
 
 private struct MessageRow: View {
     let message: ChatMessage
-    let isStreaming: Bool
+    /// Es el último mensaje y la respuesta sigue en curso.
+    let isActive: Bool
 
     var body: some View {
         switch message.role {
@@ -273,28 +316,25 @@ private struct MessageRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(AITheme.accent)
                     .padding(.top, 2)
-                if message.text.isEmpty && isStreaming {
+                if message.text.isEmpty && isActive {
                     TypingDots()
-                } else {
+                } else if !message.text.isEmpty {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(Self.markdown(message.text))
                             .foregroundStyle(.white.opacity(0.92))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        if let usage = message.usage {
-                            Text(usage.costText)
+                        if message.isComplete {
+                            Text(message.usages.costText)
                                 .font(.system(size: 10))
                                 .foregroundStyle(.white.opacity(0.5))
-                                .help(usage.details)
-                        } else if message.isComplete {
-                            Text("Costo no disponible")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.white.opacity(0.5))
-                                .help("DeepSeek no devolvió el consumo de esta consulta; puede ocurrir al detenerla o perder la conexión.")
+                                .help(message.usages.details)
                         }
                     }
                 }
             }
+        case .tool:
+            ToolRow(message: message)
         }
     }
 
@@ -375,6 +415,80 @@ private struct DropHint: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
             .allowsHitTesting(false)
+    }
+}
+
+/// Una herramienta que usó el asistente: una línea; el tooltip muestra el resultado.
+private struct ToolRow: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: message.toolName.flatMap(AgentTool.init(rawValue:))?.icon ?? "wrench")
+                .frame(width: 14)
+            Text(message.toolSummary ?? message.toolName ?? "")
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if message.toolFailed {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(AITheme.pink)
+            }
+        }
+        .font(.system(size: 11, design: .monospaced))
+        .foregroundStyle(.white.opacity(0.55))
+        .padding(.leading, 19)
+        .help(String(message.text.prefix(1500)))
+    }
+}
+
+/// Acción del asistente que espera aprobación: qué quiere hacer, el detalle y los botones.
+private struct ApprovalCard: View {
+    let approval: ToolApproval
+    let onDecide: (Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: approval.icon)
+                    .foregroundStyle(AITheme.accent)
+                Text(approval.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button("Rechazar") { onDecide(false) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.75))
+                Button { onDecide(true) } label: {
+                    Text("Aprobar")
+                        .font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 3)
+                        .background(AITheme.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            if !approval.detail.isEmpty {
+                ScrollView {
+                    Text(approval.detail)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 64)
+                .padding(6)
+                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .padding(8)
+        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(AITheme.accent, lineWidth: 1)
+                .opacity(0.6)
+        )
     }
 }
 

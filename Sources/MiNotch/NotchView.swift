@@ -3,7 +3,7 @@ import SwiftUI
 /// Estado compartido entre el panel (que detecta el hover) y la vista (que lo dibuja).
 @MainActor
 final class NotchState: ObservableObject {
-    static let expandedSize = CGSize(width: 480, height: 300)
+    static let expandedSize = CGSize(width: 500, height: 360)
     static let collapsedWidth: CGFloat = 200
     /// Espacio libre entre la píldora en reposo y el borde inferior de la barra de menú.
     static let gapToWindows: CGFloat = 4
@@ -58,7 +58,7 @@ struct NotchView: View {
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
                 ZStack(alignment: .top) {
                     AIBackgroundTint()
-                    ChatView(chat: chat, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
+                    ChatView(chat: chat, workspace: chat.workspace, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
                 }
                 .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
                 .transition(.opacity)

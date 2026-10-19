@@ -91,3 +91,23 @@ enum BillingFormat {
         return "\(number) \(currency)"
     }
 }
+
+extension [ConsultationUsage] {
+    /// Una respuesta con herramientas son varias consultas a la API: se suman.
+    var costText: String {
+        let costs = compactMap { $0.tokens.estimatedCost(model: $0.model, date: $0.date) }
+        guard !isEmpty, costs.count == count else { return "Costo no disponible" }
+        let total = "≈ \(BillingFormat.money(costs.reduce(0, +), currency: "USD"))"
+        return count > 1 ? "\(total) · \(count) consultas" : total
+    }
+
+    var details: String {
+        guard let first else {
+            return "DeepSeek no devolvió el consumo de esta consulta; puede ocurrir al detenerla o perder la conexión."
+        }
+        guard count > 1 else { return first.details }
+        let input = reduce(0) { $0 + $1.tokens.prompt_tokens }
+        let output = reduce(0) { $0 + $1.tokens.completion_tokens }
+        return "\(first.model) · \(count) consultas (una por cada paso con herramientas) · \(input) tokens de entrada en total (cada consulta reenvía el historial), \(output) de salida (incluye razonamiento). Costo estimado; puede variar por feriados chinos o cambios de precios."
+    }
+}
