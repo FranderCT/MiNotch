@@ -12,11 +12,16 @@ final class ChatTabs: ObservableObject {
     @Published private(set) var selectedID: UUID
     /// Alguna pestaña está respondiendo sin esperar al usuario: el borde gira.
     @Published private(set) var isAnyWorking = false
+    /// Pestañas esperando una aprobación o contraseña del usuario.
+    @Published private(set) var needingAttention: [ChatSession] = []
     private var observers: [UUID: AnyCancellable] = [:]
+    /// Los números no se reutilizan: "la pestaña 3" sigue siendo la misma aunque se cierren otras.
+    private var nextNumber = 1
 
     init(account: DeepSeekAccount) {
         self.account = account
-        let first = ChatSession(account: account)
+        let first = ChatSession(account: account, number: nextNumber)
+        nextNumber += 1
         tabs = [first]
         selectedID = first.id
         observe(first)
@@ -41,12 +46,23 @@ final class ChatTabs: ObservableObject {
 
     /// Como en una terminal: la pestaña nueva arranca en la carpeta de la actual.
     func newTab() {
-        guard canAddTab else { return }
-        let tab = ChatSession(account: account, directory: selected.workspace.directory)
-        let index = (tabs.firstIndex { $0.id == selectedID } ?? tabs.count - 1) + 1
-        tabs.insert(tab, at: index)
+        newTab(directory: selected.workspace.directory, title: nil, select: true)
+    }
+
+    /// `select` false: la abre otra pestaña (orquestación) y el usuario sigue donde estaba.
+    @discardableResult
+    func newTab(directory: URL, title: String?, select: Bool) -> ChatSession? {
+        guard canAddTab else { return nil }
+        let tab = ChatSession(account: account, number: nextNumber, directory: directory, title: title)
+        nextNumber += 1
+        tabs.insert(tab, at: select ? (tabs.firstIndex { $0.id == selectedID } ?? tabs.count - 1) + 1 : tabs.count)
         observe(tab)
-        selectedID = tab.id
+        if select { selectedID = tab.id }
+        return tab
+    }
+
+    func tab(number: Int) -> ChatSession? {
+        tabs.first { $0.number == number }
     }
 
     /// Corta su respuesta y cierra sus sesiones de terminal. La última se reemplaza por una vacía.
@@ -58,7 +74,8 @@ final class ChatTabs: ObservableObject {
         observers[id] = nil
         tabs.remove(at: index)
         if tabs.isEmpty {
-            let fresh = ChatSession(account: account, directory: tab.workspace.directory)
+            let fresh = ChatSession(account: account, number: nextNumber, directory: tab.workspace.directory)
+            nextNumber += 1
             tabs = [fresh]
             observe(fresh)
         }
@@ -89,6 +106,7 @@ final class ChatTabs: ObservableObject {
     }
 
     private func observe(_ tab: ChatSession) {
+        tab.tabs = self
         observers[tab.id] = tab.$isStreaming
             .combineLatest(tab.$pendingApproval, tab.$pendingSecret)
             .receive(on: RunLoop.main)
@@ -98,5 +116,7 @@ final class ChatTabs: ObservableObject {
     private func updateWorking() {
         let working = tabs.contains(where: \.isWorking)
         if working != isAnyWorking { isAnyWorking = working }
+        let attention = tabs.filter(\.needsAttention)
+        if attention.map(\.id) != needingAttention.map(\.id) { needingAttention = attention }
     }
 }

@@ -30,6 +30,9 @@ struct ChatView: View {
             } else {
                 missingKey
             }
+            if let other = tabs.needingAttention.first(where: { $0.id != chat.id }) {
+                attentionBanner(other)
+            }
             if let approval = chat.pendingApproval {
                 ApprovalCard(approval: approval, onDecide: chat.resolveApproval)
             }
@@ -277,6 +280,27 @@ struct ChatView: View {
         .help(terminals.sessions.map { "\($0.id): \($0.command)" }.joined(separator: "\n"))
     }
 
+    /// Otra pestaña espera una aprobación o contraseña: un clic lleva a ella.
+    private func attentionBanner(_ other: ChatSession) -> some View {
+        Button { tabs.select(other.id) } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.bubble.fill")
+                Text("La pestaña \(other.number) (\(other.displayName)) \(other.statusText.replacingOccurrences(of: "esperando que el usuario", with: "espera que"))")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Text("Ver")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(AITheme.pink)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(AITheme.pink.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
     /// Pedido de contraseña de una sesión: la escribe el usuario y va directo a la terminal.
     private func secretCard(_ request: SecretRequest) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -436,6 +460,11 @@ private struct MessageRow: View {
         switch message.role {
         case .user:
             VStack(alignment: .trailing, spacing: 4) {
+                if let fromTab = message.fromTab {
+                    Label("Tarea de la pestaña \(fromTab)", systemImage: "arrow.down.left.square")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
                 if let imageText = message.imageText {
                     ImageTextChip(text: imageText)
                 }
@@ -649,7 +678,9 @@ private struct TabChip: View {
             } else if tab.isStreaming {
                 Circle().fill(AITheme.cyan).frame(width: 6, height: 6)
             }
-            Text(workspace.directory.lastPathComponent)
+            Text("\(tab.number)")
+                .foregroundStyle(.white.opacity(0.4))
+            Text(tab.displayName)
                 .lineLimit(1)
                 .truncationMode(.middle)
             if isSelected {

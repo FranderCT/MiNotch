@@ -70,6 +70,11 @@ enum AgentTool: String, CaseIterable, Sendable {
     case terminalSend = "terminal_send"
     case terminalRead = "terminal_read"
     case terminalClose = "terminal_close"
+    case tabList = "tab_list"
+    case tabOpen = "tab_open"
+    case tabSend = "tab_send"
+    case tabRead = "tab_read"
+    case tabClose = "tab_close"
 
     private static let readLimit = 60_000
     private static let listLimit = 300
@@ -90,7 +95,18 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .terminalSend: "keyboard"
         case .terminalRead: "text.alignleft"
         case .terminalClose: "xmark.square"
+        case .tabList: "rectangle.stack"
+        case .tabOpen: "plus.rectangle.on.rectangle"
+        case .tabSend: "arrow.up.right.square"
+        case .tabRead: "arrow.down.left.square"
+        case .tabClose: "xmark.rectangle"
         }
+    }
+
+    /// Coordinan otras pestañas: las ejecuta ChatSession, que conoce ChatTabs. No piden aprobación
+    /// (no tocan archivos ni ejecutan nada); lo que haga cada pestaña se aprueba en esa pestaña.
+    var isTab: Bool {
+        [.tabList, .tabOpen, .tabSend, .tabRead, .tabClose].contains(self)
     }
 
     /// Las de terminal las ejecuta ChatSession: necesitan las sesiones abiertas y pedir contraseñas.
@@ -113,6 +129,11 @@ enum AgentTool: String, CaseIterable, Sendable {
         case .terminalSend: "[\(args["session"] ?? "?")] \(Self.visibleInput(args["input"] ?? ""))"
         case .terminalRead: "[\(args["session"] ?? "?")] leer salida"
         case .terminalClose: "[\(args["session"] ?? "?")] cerrar"
+        case .tabList: "Ver pestañas"
+        case .tabOpen: "Abrir pestaña \(args["name"] ?? args["directory"] ?? "")"
+        case .tabSend: "→ pestaña \(args["tab"] ?? "?"): \(args["message"] ?? "")"
+        case .tabRead: "← pestaña \(args["tab"] ?? "?")"
+        case .tabClose: "Cerrar pestaña \(args["tab"] ?? "?")"
         }
     }
 
@@ -216,6 +237,48 @@ enum AgentTool: String, CaseIterable, Sendable {
             properties: ["session": "Número de sesión."],
             required: ["session"]
         ),
+        ToolDefinition(
+            name: tabList.rawValue,
+            description: "Lista las pestañas del notch: número, nombre, carpeta, rama, sesiones de terminal, estado (libre, trabajando o esperando al usuario) y su última respuesta.",
+            properties: [:],
+            required: []
+        ),
+        ToolDefinition(
+            name: tabOpen.rawValue,
+            description: "Abre otra pestaña: un asistente independiente, con su carpeta y sus sesiones de terminal. Opcionalmente le da una primera tarea, que empieza a hacer enseguida.",
+            properties: [
+                "name": "Nombre corto para la pestaña, por ejemplo \"srv-8\".",
+                "directory": "Carpeta de trabajo; por defecto la de esta pestaña.",
+                "task": "Primera tarea, escrita como se la darías a un colega (qué hacer y qué responder al terminar).",
+            ],
+            required: []
+        ),
+        ToolDefinition(
+            name: tabSend.rawValue,
+            description: "Le manda una tarea a otra pestaña (tiene que estar libre). Con wait \"true\" (por defecto) espera y devuelve su respuesta final; con \"false\" vuelve enseguida, para trabajar con varias en paralelo y después juntar los resultados con tab_read.",
+            properties: [
+                "tab": "Número de pestaña.",
+                "message": "La tarea.",
+                "wait": "\"true\" (por defecto) o \"false\".",
+                "wait_seconds": "Máximo a esperar (por defecto 120, hasta 600).",
+            ],
+            required: ["tab", "message"]
+        ),
+        ToolDefinition(
+            name: tabRead.rawValue,
+            description: "Espera a que otra pestaña termine lo que está haciendo (o necesite al usuario) y devuelve su última respuesta.",
+            properties: [
+                "tab": "Número de pestaña.",
+                "wait_seconds": "Máximo a esperar (por defecto 120, hasta 600).",
+            ],
+            required: ["tab"]
+        ),
+        ToolDefinition(
+            name: tabClose.rawValue,
+            description: "Cierra otra pestaña (y sus sesiones de terminal).",
+            properties: ["tab": "Número de pestaña."],
+            required: ["tab"]
+        ),
     ]
 
     // MARK: - Aprobación
@@ -224,7 +287,8 @@ enum AgentTool: String, CaseIterable, Sendable {
     func approval(for args: [String: String], in root: URL) -> ToolApproval? {
         let path = args["path"] ?? ""
         switch self {
-        case .listDirectory, .readFile, .searchFiles, .terminalRead, .terminalClose:
+        case .listDirectory, .readFile, .searchFiles, .terminalRead, .terminalClose,
+             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose:
             return nil
         case .writeFile:
             let exists = Self.resolve(path, in: root).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
@@ -360,7 +424,8 @@ enum AgentTool: String, CaseIterable, Sendable {
             try text.replacingOccurrences(of: oldText, with: args["new_text"] ?? "").write(to: url, atomically: true, encoding: .utf8)
             return ToolOutcome(text: "Archivo editado.")
 
-        case .runCommand, .changeDirectory, .terminalStart, .terminalSend, .terminalRead, .terminalClose:
+        case .runCommand, .changeDirectory, .terminalStart, .terminalSend, .terminalRead, .terminalClose,
+             .tabList, .tabOpen, .tabSend, .tabRead, .tabClose:
             throw ToolError("Se ejecuta en otro lado.")
         }
     }

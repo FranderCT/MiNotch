@@ -23,18 +23,26 @@ struct ChatMessage: Identifiable, Sendable {
     var toolName: String?
     var toolSummary: String?
     var toolFailed = false
+    /// Usuario: el mensaje lo mandó otra pestaña (orquestación), no la persona.
+    var fromTab: Int?
 
-    /// Lo que recibe DeepSeek: la pregunta y, si hay, el texto de la imagen.
+    /// Lo que recibe DeepSeek: la pregunta y, si hay, el texto de la imagen o de qué pestaña viene.
     var apiContent: String {
-        guard let imageText else { return text }
-        return """
-            Texto de una imagen que adjunté, como una captura de pantalla (extraído con OCR, puede tener errores):
-            \"\"\"
-            \(imageText)
-            \"\"\"
+        var content = text
+        if let imageText {
+            content = """
+                Texto de una imagen que adjunté, como una captura de pantalla (extraído con OCR, puede tener errores):
+                \"\"\"
+                \(imageText)
+                \"\"\"
 
-            \(text)
-            """
+                \(content)
+                """
+        }
+        if let fromTab {
+            content = "[Tarea de la pestaña \(fromTab), no del usuario. Tu respuesta final es lo que recibe.]\n\(content)"
+        }
+        return content
     }
 }
 
@@ -43,6 +51,12 @@ struct ChatMessage: Identifiable, Sendable {
 @MainActor
 final class ChatSession: ObservableObject, Identifiable {
     let id = UUID()
+    /// Número visible y estable (no se reutiliza): así se refieren las pestañas entre sí.
+    let number: Int
+    /// Nombre opcional (lo pone el orquestador, por ejemplo "srv-8"); si no, se muestra la carpeta.
+    @Published var title: String?
+    /// Para coordinar otras pestañas (tab_list, tab_open, tab_send…).
+    weak var tabs: ChatTabs?
     @Published private(set) var messages: [ChatMessage] = []
     @Published var input = ""
     @Published private(set) var isStreaming = false
@@ -77,8 +91,10 @@ final class ChatSession: ObservableObject, Identifiable {
 
     private var streamTask: Task<Void, Never>?
 
-    init(account: DeepSeekAccount, directory: URL? = nil) {
+    init(account: DeepSeekAccount, number: Int, directory: URL? = nil, title: String? = nil) {
         self.account = account
+        self.number = number
+        self.title = title
         workspace = Workspace(directory: directory)
     }
 
@@ -90,6 +106,23 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Necesita al usuario: una aprobación o una contraseña.
     var needsAttention: Bool {
         pendingApproval != nil || pendingSecret != nil
+    }
+
+    /// Nombre para mostrar: el título o, si no tiene, la carpeta.
+    var displayName: String {
+        title ?? workspace.directory.lastPathComponent
+    }
+
+    /// Para tab_list y tab_read.
+    var statusText: String {
+        if pendingApproval != nil { return "esperando que el usuario apruebe una acción" }
+        if pendingSecret != nil { return "esperando que el usuario escriba una contraseña" }
+        return isStreaming ? "trabajando" : "libre"
+    }
+
+    /// La última respuesta con texto del asistente.
+    var lastReply: String? {
+        messages.last { $0.role == .assistant && !$0.text.isEmpty }?.text
     }
 
 
@@ -146,8 +179,19 @@ final class ChatSession: ObservableObject, Identifiable {
 
         input = ""
         discardImageText()
+        start(ChatMessage(role: .user, text: text, imageText: imageText))
+    }
+
+    /// Tarea que manda otra pestaña. false si esta está ocupada o falta la API key.
+    func receive(_ text: String, fromTab: Int) -> Bool {
+        guard !isStreaming, !isReadingImage, account.hasAPIKey else { return false }
+        start(ChatMessage(role: .user, text: text, fromTab: fromTab))
+        return true
+    }
+
+    private func start(_ message: ChatMessage) {
         errorMessage = nil
-        messages.append(ChatMessage(role: .user, text: text, imageText: imageText))
+        messages.append(message)
         isStreaming = true
 
         let model = UserDefaults.standard.string(forKey: DeepSeekClient.modelDefaultsKey) ?? DeepSeekClient.defaultModel
@@ -175,7 +219,7 @@ final class ChatSession: ObservableObject, Identifiable {
                 messages.append(reply)
 
                 var calls: [Int: ToolCall] = [:]
-                for try await event in client.stream(history, workingDirectory: workspace.directory, git: workspace.git) {
+                for try await event in client.stream(history, workingDirectory: workspace.directory, git: workspace.git, tabContext: tabContext) {
                     try Task.checkCancellation()
                     guard let index = messages.firstIndex(where: { $0.id == reply.id }) else { continue }
                     switch event {
@@ -233,6 +277,8 @@ final class ChatSession: ObservableObject, Identifiable {
                 outcome = changeDirectory(to: args["path"] ?? "")
             } else if tool.isTerminal {
                 outcome = await runTerminalTool(tool, args)
+            } else if tool.isTab {
+                outcome = await runTabTool(tool, args)
             } else {
                 outcome = await tool.execute(args, in: workspace.directory)
             }
@@ -254,6 +300,86 @@ final class ChatSession: ObservableObject, Identifiable {
         }
         workspace.move(to: url)
         return ToolOutcome(text: "Carpeta de trabajo: \(workspace.directory.path)")
+    }
+
+    // MARK: - Pestañas (orquestación)
+
+    /// Para el system prompt: qué pestaña es esta y cuáles hay.
+    private var tabContext: String {
+        let others = tabs?.tabs.filter { $0.id != id }.map { "\($0.number) (\($0.displayName), \($0.statusText))" } ?? []
+        let list = others.isEmpty ? "No hay otras pestañas abiertas." : "Otras pestañas: \(others.joined(separator: "; "))."
+        return "Estás en la pestaña \(number) (\(displayName)). \(list)"
+    }
+
+    private func runTabTool(_ tool: AgentTool, _ args: [String: String]) async -> ToolOutcome {
+        guard let tabs else { return ToolOutcome(text: "Las pestañas no están disponibles.", failed: true) }
+        let wait = min(max(Double(args["wait_seconds"] ?? "") ?? 120, 1), 600)
+
+        if tool == .tabList {
+            let lines = tabs.tabs.map { tab in
+                var line = "\(tab.number) · \(tab.displayName)\(tab.id == id ? " (esta)" : "") · \(tab.workspace.displayPath)"
+                if let git = tab.workspace.git { line += " · rama \(git.branch)" }
+                if !tab.terminals.sessions.isEmpty { line += " · \(tab.terminals.sessions.count) sesión(es) de terminal" }
+                line += " · \(tab.statusText)"
+                if tab.id != id, let reply = tab.lastReply { line += "\n   última respuesta: \(reply.prefix(200))" }
+                return line
+            }
+            return ToolOutcome(text: lines.joined(separator: "\n"))
+        }
+
+        if tool == .tabOpen {
+            let directory = args["directory"].map { AgentTool.directoryURL($0, from: workspace.directory) } ?? workspace.directory
+            guard Workspace.isDirectory(directory) else {
+                return ToolOutcome(text: "No existe la carpeta \(directory.path).", failed: true)
+            }
+            guard let tab = tabs.newTab(directory: directory, title: args["name"], select: false) else {
+                return ToolOutcome(text: "No se pueden abrir más de \(ChatTabs.maxTabs) pestañas: cerrá alguna con tab_close.", failed: true)
+            }
+            guard let task = args["task"], !task.isEmpty else {
+                return ToolOutcome(text: "Pestaña \(tab.number) abierta (\(tab.displayName)) en \(tab.workspace.displayPath).")
+            }
+            _ = tab.receive(task, fromTab: number)
+            return ToolOutcome(text: "Pestaña \(tab.number) abierta (\(tab.displayName)) y trabajando en la tarea. Usá tab_read para ver el resultado.")
+        }
+
+        guard let target = Int(args["tab"] ?? "").flatMap(tabs.tab(number:)) else {
+            return ToolOutcome(text: "No existe la pestaña \(args["tab"] ?? ""). Usá tab_list.", failed: true)
+        }
+        guard target.id != id else {
+            return ToolOutcome(text: "Esa es esta misma pestaña.", failed: true)
+        }
+
+        switch tool {
+        case .tabSend:
+            guard target.receive(args["message"] ?? "", fromTab: number) else {
+                return ToolOutcome(text: "La pestaña \(target.number) está \(target.statusText): esperá con tab_read y volvé a intentar.", failed: true)
+            }
+            guard args["wait"]?.lowercased() != "false" else {
+                return ToolOutcome(text: "Tarea enviada a la pestaña \(target.number). Usá tab_read para el resultado.")
+            }
+            return await result(of: target, maxWait: wait)
+        case .tabRead:
+            return await result(of: target, maxWait: wait)
+        case .tabClose:
+            tabs.close(target.id)
+            return ToolOutcome(text: "Pestaña \(target.number) cerrada (con sus sesiones de terminal).")
+        default:
+            return ToolOutcome(text: "Herramienta de pestañas desconocida.", failed: true)
+        }
+    }
+
+    /// Espera a que la otra pestaña termine (o necesite al usuario, o se acabe el tiempo) y trae su respuesta.
+    private func result(of target: ChatSession, maxWait: TimeInterval) async -> ToolOutcome {
+        let start = Date()
+        while target.isStreaming, !target.needsAttention, !Task.isCancelled, Date().timeIntervalSince(start) < maxWait {
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        let reply = target.lastReply.map { String($0.prefix(8000)) } ?? "(todavía sin respuesta)"
+        if target.isStreaming {
+            return ToolOutcome(text: "La pestaña \(target.number) sigue \(target.statusText). Respuesta hasta ahora:\n\(reply)")
+        }
+        let error = target.errorMessage.map { "\nError: \($0)" } ?? ""
+        return ToolOutcome(text: "Pestaña \(target.number) terminó.\n\(reply)\(error)", failed: target.errorMessage != nil)
     }
 
     // MARK: - Terminal

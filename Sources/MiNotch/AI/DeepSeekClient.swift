@@ -7,7 +7,7 @@ struct DeepSeekClient: Sendable {
     static let modelDefaultsKey = "deepseekModel"
 
     private static let endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
-    private static func systemPrompt(workingDirectory: URL, git: GitInfo?) -> String {
+    private static func systemPrompt(workingDirectory: URL, git: GitInfo?, tabContext: String) -> String {
         """
         Sos un asistente de programación que vive en el notch de una Mac. Trabajás en la carpeta \
         \(workingDirectory.path) y tenés herramientas para listar, leer, buscar, crear y editar archivos \
@@ -23,6 +23,12 @@ struct DeepSeekClient: Sendable {
         terminal_read y terminal_close. Si aparece un pedido de contraseña o passphrase, el usuario la escribe \
         en un campo seguro que vos no ves: nunca se la pidas en el chat. Evitá paginadores y pantallas completas \
         (usá --no-pager, | cat, top -l 1 o top -bn1 en vez de top, etc.).
+        - Vivís en una de varias pestañas; cada una es un asistente independiente con su carpeta y sus \
+        sesiones de terminal. \(tabContext) Podés coordinarlas: tab_open (con una primera tarea), tab_send, \
+        tab_read, tab_list y tab_close. Para tareas en varias pestañas a la vez, mandá todas con wait "false" y \
+        después juntá los resultados con tab_read. Si una pestaña queda esperando al usuario, avisale que la revise.
+        - Si el mensaje dice que es una tarea de otra pestaña, hacela y terminá con una respuesta concisa con el \
+        resultado: es lo que recibe esa pestaña.
         - No ejecutes comandos destructivos (rm -rf, git reset --hard, git push --force…) salvo que el usuario \
         lo pida explícitamente. No arranques servidores ni procesos que no terminan: decile al usuario cómo \
         correrlos él.
@@ -35,11 +41,11 @@ struct DeepSeekClient: Sendable {
     let model: String
 
     /// Emite los fragmentos de la respuesta a medida que llegan: texto, razonamiento y llamadas a herramientas.
-    func stream(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?) -> AsyncThrowingStream<DeepSeekStreamEvent, Error> {
+    func stream(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?, tabContext: String) -> AsyncThrowingStream<DeepSeekStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let request = try makeRequest(history, workingDirectory: workingDirectory, git: git)
+                    let request = try makeRequest(history, workingDirectory: workingDirectory, git: git, tabContext: tabContext)
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw DeepSeekError.invalidResponse }
                     guard http.statusCode == 200 else {
@@ -91,8 +97,8 @@ struct DeepSeekClient: Sendable {
         return try JSONDecoder().decode(DeepSeekBalance.self, from: data)
     }
 
-    private func makeRequest(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?) throws -> URLRequest {
-        let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt(workingDirectory: workingDirectory, git: git))]
+    private func makeRequest(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?, tabContext: String) throws -> URLRequest {
+        let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt(workingDirectory: workingDirectory, git: git, tabContext: tabContext))]
             + history.map { RequestBody.Message($0) }
 
         var request = URLRequest(url: Self.endpoint)
