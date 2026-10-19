@@ -6,7 +6,6 @@ import SwiftUI
 @MainActor
 final class NotchPanel: NSPanel {
     private let state = NotchState()
-    private var monitors: [Any] = []
 
     init() {
         super.init(
@@ -34,8 +33,6 @@ final class NotchPanel: NSPanel {
         let hosting = NSHostingView(rootView: NotchView(state: state))
         hosting.frame = NSRect(origin: .zero, size: NotchState.expandedSize)
         contentView = hosting
-
-        startMouseTracking()
     }
 
     override var canBecomeKey: Bool { false }
@@ -55,21 +52,7 @@ final class NotchPanel: NSPanel {
 
     // MARK: - Hover
 
-    private func startMouseTracking() {
-        // Global: eventos que van a otras apps (panel en click-through).
-        // Local: eventos que llegan a esta app (panel aceptando el mouse).
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in
-            MainActor.assumeIsolated { self?.updateHover() }
-        }) {
-            monitors.append(global)
-        }
-        if let local = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] event in
-            MainActor.assumeIsolated { self?.updateHover() }
-            return event
-        }) {
-            monitors.append(local)
-        }
-    }
+    var isExpanded: Bool { state.isExpanded }
 
     /// Rectángulo visible de la píldora en coordenadas de pantalla.
     private var pillRect: NSRect {
@@ -82,21 +65,11 @@ final class NotchPanel: NSPanel {
         )
     }
 
-    private func updateHover() {
-        // El borde superior es inclusivo: el cursor pegado arriba también cuenta.
-        let mouse = NSEvent.mouseLocation
-        let rect = pillRect
-        let inside = mouse.x >= rect.minX && mouse.x <= rect.maxX
-            && mouse.y >= rect.minY && mouse.y <= rect.maxY
+    func updateHover(mouse: NSPoint = NSEvent.mouseLocation) {
+        let inside = pillRect.containsInclusive(mouse)
         guard inside != state.isExpanded else { return }
 
         state.isExpanded = inside
         ignoresMouseEvents = !inside
-    }
-
-    override func close() {
-        monitors.forEach(NSEvent.removeMonitor)
-        monitors.removeAll()
-        super.close()
     }
 }

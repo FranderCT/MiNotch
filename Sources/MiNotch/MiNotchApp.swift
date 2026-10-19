@@ -20,7 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     /// Un panel por pantalla conectada.
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
+    /// Áreas de todos los paneles: fuera de ellas el movimiento del mouse se descarta enseguida.
+    private var hotZones: [NSRect] = []
     private let screenManager = ScreenManager()
+    private let mouseTracker = MouseTracker()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -29,6 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.syncPanels(with: screens)
         }
         screenManager.start()
+
+        mouseTracker.onMove = { [weak self] point in
+            self?.routeMouse(at: point)
+        }
+        mouseTracker.start()
+    }
+
+    private func routeMouse(at point: NSPoint) {
+        // Camino rápido: cursor lejos de todas las píldoras y ninguna expandida que deba cerrarse.
+        guard hotZones.contains(where: { $0.containsInclusive(point) })
+            || panels.values.contains(where: \.isExpanded) else { return }
+        panels.values.forEach { $0.updateHover(mouse: point) }
     }
 
     /// Reutiliza el panel de cada pantalla que sigue conectada, crea los nuevos y cierra los sobrantes.
@@ -43,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         panels.values.forEach { $0.close() }
         panels = updated
+        hotZones = updated.values.map(\.frame)
     }
 
     private func setupStatusItem() {
