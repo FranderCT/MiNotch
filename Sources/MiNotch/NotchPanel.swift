@@ -16,6 +16,8 @@ final class NotchPanel: NSPanel {
             defer: false
         )
 
+        // ARC maneja la vida del panel; evita el release extra al cerrarlo.
+        isReleasedWhenClosed = false
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false

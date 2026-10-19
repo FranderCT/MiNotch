@@ -12,8 +12,15 @@ final class NotchState: ObservableObject {
     /// Se ajusta a la altura de la barra de menú de la pantalla actual.
     @Published var collapsedSize = CGSize(width: collapsedWidth, height: 26)
 
-    /// Altura en reposo para que la píldora no invada el área de las ventanas.
+    /// Tamaño en reposo según la pantalla: cubre el notch físico si existe;
+    /// si no, cabe en la barra de menú sin invadir el área de las ventanas.
     func fit(to screen: NSScreen) {
+        if let notch = screen.notchSize {
+            collapsedSize = CGSize(width: max(Self.collapsedWidth, notch.width), height: notch.height)
+            return
+        }
+
+        collapsedSize.width = Self.collapsedWidth
         let menuBarHeight = screen.frame.maxY - screen.visibleFrame.maxY
         // Barra de menú oculta (auto-hide): usar una altura estándar.
         let available = menuBarHeight > 0 ? menuBarHeight : 30

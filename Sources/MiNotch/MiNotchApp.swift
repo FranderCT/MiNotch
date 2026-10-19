@@ -18,20 +18,31 @@ enum MiNotchApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var panel: NotchPanel?
+    /// Un panel por pantalla conectada.
+    private var panels: [CGDirectDisplayID: NotchPanel] = [:]
     private let screenManager = ScreenManager()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
 
-        let panel = NotchPanel()
-        self.panel = panel
-
-        screenManager.onScreenChange = { [weak panel] screen in
-            panel?.position(on: screen)
+        screenManager.onScreensChange = { [weak self] screens in
+            self?.syncPanels(with: screens)
         }
         screenManager.start()
-        panel.orderFrontRegardless()
+    }
+
+    /// Reutiliza el panel de cada pantalla que sigue conectada, crea los nuevos y cierra los sobrantes.
+    private func syncPanels(with screens: [NSScreen]) {
+        var updated: [CGDirectDisplayID: NotchPanel] = [:]
+        for screen in screens {
+            guard let id = screen.displayID else { continue }
+            let panel = panels.removeValue(forKey: id) ?? NotchPanel()
+            panel.position(on: screen)
+            panel.orderFrontRegardless()
+            updated[id] = panel
+        }
+        panels.values.forEach { $0.close() }
+        panels = updated
     }
 
     private func setupStatusItem() {
