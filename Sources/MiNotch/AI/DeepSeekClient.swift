@@ -16,7 +16,7 @@ struct DeepSeekClient: Sendable {
     let model: String
 
     /// Emite los fragmentos de texto de la respuesta a medida que llegan.
-    func stream(_ history: [ChatMessage]) -> AsyncThrowingStream<String, Error> {
+    func stream(_ history: [ChatMessage]) -> AsyncThrowingStream<DeepSeekStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -36,7 +36,10 @@ struct DeepSeekClient: Sendable {
 
                         let chunk = try JSONDecoder().decode(StreamChunk.self, from: Data(payload.utf8))
                         if let text = chunk.choices.first?.delta.content, !text.isEmpty {
-                            continuation.yield(text)
+                            continuation.yield(.text(text))
+                        }
+                        if let usage = chunk.usage {
+                            continuation.yield(.usage(usage, model: chunk.model ?? model, date: chunk.created.map { Date(timeIntervalSince1970: $0) } ?? Date()))
                         }
                     }
                     continuation.finish()
@@ -48,6 +51,18 @@ struct DeepSeekClient: Sendable {
         }
     }
 
+    func balance() async throws -> DeepSeekBalance {
+        var request = URLRequest(url: URL(string: "https://api.deepseek.com/user/balance")!)
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw DeepSeekError.invalidResponse }
+        guard http.statusCode == 200 else {
+            throw DeepSeekError.http(status: http.statusCode, body: String(decoding: data, as: UTF8.self))
+        }
+        return try JSONDecoder().decode(DeepSeekBalance.self, from: data)
+    }
+
     private func makeRequest(_ history: [ChatMessage]) throws -> URLRequest {
         let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt)]
             + history.map { RequestBody.Message(role: $0.role.rawValue, content: $0.text) }
@@ -56,7 +71,7 @@ struct DeepSeekClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(RequestBody(model: model, messages: messages, stream: true))
+        request.httpBody = try JSONEncoder().encode(RequestBody(model: model, messages: messages, stream: true, stream_options: .init(include_usage: true)))
         return request
     }
 }
@@ -93,9 +108,16 @@ private struct RequestBody: Encodable {
     let model: String
     let messages: [Message]
     let stream: Bool
+    struct StreamOptions: Encodable { let include_usage: Bool }
+    let stream_options: StreamOptions
 }
 
-private struct StreamChunk: Decodable {
+enum DeepSeekStreamEvent: Sendable {
+    case text(String)
+    case usage(DeepSeekUsage, model: String, date: Date)
+}
+
+struct StreamChunk: Decodable {
     struct Choice: Decodable {
         struct Delta: Decodable {
             let content: String?
@@ -105,4 +127,7 @@ private struct StreamChunk: Decodable {
     }
 
     let choices: [Choice]
+    let usage: DeepSeekUsage?
+    let model: String?
+    let created: TimeInterval?
 }

@@ -65,6 +65,17 @@ private struct SettingsView: View {
                 Text("DeepSeek")
             }
 
+            Section("Saldo de la cuenta") {
+                LabeledContent("Disponible", value: chat.balance?.summary ?? "Sin consultar")
+                if let error = chat.balanceError {
+                    Text(error).font(.footnote).foregroundStyle(.red)
+                }
+                Button(chat.isRefreshingBalance ? "Actualizando…" : "Actualizar saldo", action: chat.refreshBalance)
+                    .disabled(!chat.hasAPIKey || chat.isRefreshingBalance)
+                Link("Ver consumo y recargar", destination: URL(string: "https://platform.deepseek.com/usage")!)
+                    .font(.footnote)
+            }
+
             Section {
                 Picker("Modelo", selection: $model) {
                     ForEach(DeepSeekClient.models, id: \.self) { Text($0) }
@@ -78,6 +89,7 @@ private struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 440)
         .fixedSize()
+        .onAppear { chat.refreshBalanceIfNeeded() }
     }
 
     private func save() {

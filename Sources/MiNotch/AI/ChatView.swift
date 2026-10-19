@@ -13,6 +13,7 @@ struct ChatView: View {
             header
                 .frame(height: topInset)
             if chat.hasAPIKey {
+                balanceBar
                 conversation
             } else {
                 missingKey
@@ -22,6 +23,7 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
         .foregroundStyle(.white)
+        .onAppear { chat.refreshBalanceIfNeeded() }
     }
 
     // MARK: - Secciones
@@ -83,6 +85,30 @@ struct ChatView: View {
             }
             .frame(maxHeight: .infinity)
         }
+    }
+
+    private var balanceBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wallet.bifold")
+            Text(chat.balance.map { "Saldo: \($0.summary)" } ?? (chat.isRefreshingBalance ? "Consultando saldo…" : "Saldo no disponible"))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            if chat.balanceError != nil {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(AITheme.pink)
+            }
+            Spacer(minLength: 0)
+            Button(action: chat.refreshBalance) {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.plain)
+            .disabled(chat.isRefreshingBalance)
+            .accessibilityLabel("Actualizar saldo de DeepSeek")
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.white.opacity(0.65))
+        .help(chat.balanceError.map { "No se pudo actualizar: \($0). El saldo mostrado puede estar desactualizado." }
+              ?? "Saldo de tu cuenta DeepSeek. Se actualiza al abrir el chat y después de cada consulta.")
     }
 
     private var emptyState: some View {
@@ -175,10 +201,23 @@ private struct MessageRow: View {
                 if message.text.isEmpty && isStreaming {
                     TypingDots()
                 } else {
-                    Text(Self.markdown(message.text))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(Self.markdown(message.text))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if let usage = message.usage {
+                            Text(usage.costText)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .help(usage.details)
+                        } else if message.isComplete {
+                            Text("Costo no disponible")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .help("DeepSeek no devolvió el consumo de esta consulta; puede ocurrir al detenerla o perder la conexión.")
+                        }
+                    }
                 }
             }
         }
