@@ -38,14 +38,15 @@ struct ChatMessage: Identifiable, Sendable {
     }
 }
 
-/// Conversación compartida por todas las píldoras. Vive mientras la app está abierta.
+/// Conversación de una pestaña, con su carpeta, sus sesiones de terminal y sus aprobaciones.
+/// La comparten las píldoras de todas las pantallas. Vive mientras la pestaña esté abierta.
 @MainActor
-final class ChatSession: ObservableObject {
+final class ChatSession: ObservableObject, Identifiable {
+    let id = UUID()
     @Published private(set) var messages: [ChatMessage] = []
     @Published var input = ""
     @Published private(set) var isStreaming = false
     @Published private(set) var errorMessage: String?
-    @Published private(set) var hasAPIKey = false
     /// Texto de la imagen adjunta, pendiente de enviarse con la próxima pregunta.
     @Published private(set) var imageText: String?
     /// La imagen tenía más de `imageTextLimit` caracteres y se recortó.
@@ -56,28 +57,14 @@ final class ChatSession: ObservableObject {
     /// Tope por imagen: una captura llena de texto puede costar miles de tokens.
     static let imageTextLimit = 15_000
 
-    @Published private(set) var balance: DeepSeekBalance?
-    @Published private(set) var balanceError: String?
-    @Published private(set) var isRefreshingBalance = false
-    @Published private(set) var balanceUpdatedAt: Date?
-    private var balanceTask: Task<Void, Never>?
-    private var credentialsVersion = UUID()
 
     /// Carpeta donde el asistente lee, escribe y ejecuta comandos.
-    let workspace = Workspace()
+    let workspace: Workspace
+    /// Cuenta, saldo y modo de aprobación: compartidos con las otras pestañas.
+    let account: DeepSeekAccount
     /// Acción del asistente esperando que el usuario la apruebe o rechace.
     @Published private(set) var pendingApproval: ToolApproval?
     private var approvalContinuation: CheckedContinuation<Bool, Never>?
-    /// Preguntar antes de cada acción o hacerlo todo solo (salvo lo peligroso). Se recuerda entre reinicios.
-    @Published var approvalMode = ApprovalMode(rawValue: UserDefaults.standard.string(forKey: ApprovalMode.defaultsKey) ?? "") ?? .ask {
-        didSet {
-            UserDefaults.standard.set(approvalMode.rawValue, forKey: ApprovalMode.defaultsKey)
-            // Lo que estaba esperando también se aprueba, si no es peligroso.
-            if approvalMode == .auto, let pending = pendingApproval, pending.riskReason == nil {
-                resolveApproval(true)
-            }
-        }
-    }
     /// Sesiones de terminal interactivas (ssh, sudo…) abiertas por el asistente.
     let terminals = TerminalSessions()
     /// Una sesión pide contraseña: la escribe el usuario y va directo a la terminal, nunca a DeepSeek.
@@ -87,90 +74,24 @@ final class ChatSession: ObservableObject {
     /// Tope de pasos con herramientas por mensaje, por si el modelo entra en un bucle.
     private static let maxSteps = 25
 
-    /// Lo define AppDelegate: abre la ventana de configuración.
-    var onOpenSettings: (() -> Void)?
 
-    /// Copia en memoria de la key: se lee al consultar saldo o enviar un mensaje.
-    private var apiKey: String?
     private var streamTask: Task<Void, Never>?
 
-    init() {
-        hasAPIKey = KeychainStore.exists()
+    init(account: DeepSeekAccount, directory: URL? = nil) {
+        self.account = account
+        workspace = Workspace(directory: directory)
     }
 
-    // MARK: - API key
-
-    func saveAPIKey(_ key: String) {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        stop()
-        resetBalance()
-        hasAPIKey = KeychainStore.save(trimmed)
-        apiKey = hasAPIKey ? trimmed : nil
-        errorMessage = nil
-        refreshBalance()
+    /// Trabajando por su cuenta (no esperando al usuario): para el borde animado.
+    var isWorking: Bool {
+        isStreaming && pendingApproval == nil && pendingSecret == nil
     }
 
-    func deleteAPIKey() {
-        stop()
-        resetBalance()
-        KeychainStore.delete()
-        apiKey = nil
-        hasAPIKey = false
-        errorMessage = nil
+    /// Necesita al usuario: una aprobación o una contraseña.
+    var needsAttention: Bool {
+        pendingApproval != nil || pendingSecret != nil
     }
 
-    func openSettings() {
-        onOpenSettings?()
-    }
-
-    /// Fuera del hilo principal: el Llavero puede mostrar un diálogo de permiso que bloquea.
-    private func resolveAPIKey() async -> String? {
-        if let apiKey { return apiKey }
-        let version = credentialsVersion
-        let loaded = await Task.detached { KeychainStore.load() }.value
-        guard version == credentialsVersion else { return nil }
-        apiKey = loaded
-        return loaded
-    }
-
-    private func resetBalance() {
-        credentialsVersion = UUID()
-        balanceTask?.cancel()
-        balanceTask = nil
-        balance = nil
-        balanceError = nil
-        balanceUpdatedAt = nil
-        isRefreshingBalance = false
-    }
-
-    func refreshBalanceIfNeeded() {
-        guard balanceUpdatedAt.map({ Date().timeIntervalSince($0) < 60 }) != true else { return }
-        refreshBalance()
-    }
-
-    func refreshBalance() {
-        guard hasAPIKey, !isRefreshingBalance else { return }
-        isRefreshingBalance = true
-        balanceError = nil
-        let version = credentialsVersion
-        balanceTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                guard let key = await resolveAPIKey() else { throw DeepSeekError.missingAPIKey }
-                try Task.checkCancellation()
-                let result = try await DeepSeekClient(apiKey: key, model: DeepSeekClient.defaultModel).balance()
-                guard version == credentialsVersion, !Task.isCancelled else { return }
-                balance = result
-                balanceUpdatedAt = Date()
-            } catch {
-                guard version == credentialsVersion, !Task.isCancelled else { return }
-                balanceError = error.localizedDescription
-            }
-            isRefreshingBalance = false
-            balanceTask = nil
-        }
-    }
 
     // MARK: - Imagen adjunta
 
@@ -180,8 +101,8 @@ final class ChatSession: ObservableObject {
 
     /// nil: lo que llegó no se pudo abrir como imagen.
     func attachImage(_ image: CGImage?) {
-        guard hasAPIKey else {
-            openSettings()
+        guard account.hasAPIKey else {
+            account.openSettings()
             return
         }
         guard let image else {
@@ -221,7 +142,7 @@ final class ChatSession: ObservableObject {
             text = "Explicame este texto."
         }
         // Mientras se lee la imagen, esperar: si no, la pregunta saldría sin el texto.
-        guard !text.isEmpty, !isStreaming, !isReadingImage, hasAPIKey else { return }
+        guard !text.isEmpty, !isStreaming, !isReadingImage, account.hasAPIKey else { return }
 
         input = ""
         discardImageText()
@@ -241,9 +162,11 @@ final class ChatSession: ObservableObject {
     private func runTurn(model: String, conversation: UUID) async {
         var usages: [ConsultationUsage] = []
         do {
-            guard let apiKey = await resolveAPIKey() else { throw DeepSeekError.missingAPIKey }
+            guard let apiKey = await account.resolveAPIKey() else { throw DeepSeekError.missingAPIKey }
             let client = DeepSeekClient(apiKey: apiKey, model: model)
             var isDone = false
+            // El usuario pudo cambiar de rama desde otra terminal.
+            workspace.refreshGit()
 
             for _ in 0..<Self.maxSteps {
                 try Task.checkCancellation()
@@ -252,7 +175,7 @@ final class ChatSession: ObservableObject {
                 messages.append(reply)
 
                 var calls: [Int: ToolCall] = [:]
-                for try await event in client.stream(history, workingDirectory: workspace.directory) {
+                for try await event in client.stream(history, workingDirectory: workspace.directory, git: workspace.git) {
                     try Task.checkCancellation()
                     guard let index = messages.firstIndex(where: { $0.id == reply.id }) else { continue }
                     switch event {
@@ -291,7 +214,7 @@ final class ChatSession: ObservableObject {
             if !Task.isCancelled, conversation == conversationID { errorMessage = error.localizedDescription }
         }
         finishTurn(usages: usages, conversation: conversation)
-        refreshBalance()
+        account.refreshBalance()
     }
 
     private func runTool(_ call: ToolCall, conversation: UUID) async {
@@ -302,7 +225,7 @@ final class ChatSession: ObservableObject {
 
         if let tool, let args {
             if let approval = tool.approval(for: args, in: workspace.directory),
-               approvalMode == .ask || approval.riskReason != nil,
+               account.approvalMode == .ask || approval.riskReason != nil,
                !(await requestApproval(approval)) {
                 outcome = ToolOutcome(text: "El usuario rechazó esta acción.", failed: true)
                 summary += " — rechazado"
@@ -407,6 +330,13 @@ final class ChatSession: ObservableObject {
 
     // MARK: - Aprobación
 
+    /// Al pasar a automático: lo que estaba esperando se aprueba, salvo que sea peligroso.
+    func approvePendingIfSafe() {
+        if let pending = pendingApproval, pending.riskReason == nil {
+            resolveApproval(true)
+        }
+    }
+
     func resolveApproval(_ approved: Bool) {
         approvalContinuation?.resume(returning: approved)
         approvalContinuation = nil
@@ -442,6 +372,8 @@ final class ChatSession: ObservableObject {
     private func finishTurn(usages: [ConsultationUsage], conversation: UUID) {
         isStreaming = false
         streamTask = nil
+        // Los comandos del asistente pueden haber cambiado de rama o dejado cambios.
+        workspace.refreshGit()
         guard conversation == conversationID else { return }
 
         messages.removeAll { $0.role == .assistant && $0.text.isEmpty && $0.toolCalls.isEmpty }

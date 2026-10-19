@@ -4,7 +4,10 @@ import UniformTypeIdentifiers
 
 /// Contenido del notch expandido: encabezado, conversación y campo de texto.
 struct ChatView: View {
+    @ObservedObject var tabs: ChatTabs
+    /// La pestaña seleccionada.
     @ObservedObject var chat: ChatSession
+    @ObservedObject var account: DeepSeekAccount
     @ObservedObject var workspace: Workspace
     @ObservedObject var terminals: TerminalSessions
     /// Alto de la franja superior (barra de menú o notch físico); ahí va el encabezado.
@@ -20,7 +23,8 @@ struct ChatView: View {
         VStack(spacing: 10) {
             header
                 .frame(height: topInset)
-            if chat.hasAPIKey {
+            if account.hasAPIKey {
+                tabStrip
                 statusBar
                 conversation
             } else {
@@ -50,7 +54,11 @@ struct ChatView: View {
             }
         }
         .onDrop(of: [.fileURL, .image], isTargeted: $isDropTargeted, perform: attachDroppedImage)
-        .onAppear { chat.refreshBalanceIfNeeded() }
+        .onAppear {
+            account.refreshBalanceIfNeeded()
+            // La rama pudo cambiar desde otra terminal mientras el notch estaba cerrado.
+            workspace.refreshGit()
+        }
         .onChange(of: chat.pendingSecret?.prompt) {
             if chat.pendingSecret != nil { isSecretFocused = true }
         }
@@ -165,10 +173,42 @@ struct ChatView: View {
         }
     }
 
-    /// Carpeta de trabajo (con menú para cambiarla) y saldo de DeepSeek.
+    /// Pestañas, como en una terminal: cada una con su conversación y su carpeta.
+    private var tabStrip: some View {
+        HStack(spacing: 6) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 4) {
+                    ForEach(tabs.tabs) { tab in
+                        TabChip(
+                            tab: tab,
+                            workspace: tab.workspace,
+                            isSelected: tab.id == tabs.selectedID,
+                            onSelect: { tabs.select(tab.id) },
+                            onClose: { tabs.close(tab.id) }
+                        )
+                    }
+                }
+            }
+            .scrollIndicators(.never)
+            Button(action: tabs.newTab) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            .buttonStyle(.plain)
+            .disabled(!tabs.canAddTab)
+            .help(tabs.canAddTab ? "Nueva pestaña en la misma carpeta (⌘T)" : "Máximo \(ChatTabs.maxTabs) pestañas")
+            .accessibilityLabel("Nueva pestaña")
+        }
+    }
+
+    /// Carpeta de trabajo (con menú para cambiarla), rama de git y saldo de DeepSeek.
     private var statusBar: some View {
         HStack(spacing: 10) {
             directoryMenu
+            if let git = workspace.git {
+                GitBadge(git: git)
+            }
             if !terminals.sessions.isEmpty {
                 terminalsMenu
             }
@@ -202,19 +242,19 @@ struct ChatView: View {
 
     private var approvalModeMenu: some View {
         Menu {
-            Picker("Aprobación", selection: $chat.approvalMode) {
+            Picker("Aprobación", selection: $account.approvalMode) {
                 ForEach(ApprovalMode.allCases, id: \.self) { mode in
                     Label(mode.title, systemImage: mode.icon).tag(mode)
                 }
             }
             .pickerStyle(.inline)
         } label: {
-            Label(chat.approvalMode.title, systemImage: chat.approvalMode.icon)
-                .foregroundStyle(chat.approvalMode == .auto ? AITheme.pink : .white.opacity(0.65))
+            Label(account.approvalMode.title, systemImage: account.approvalMode.icon)
+                .foregroundStyle(account.approvalMode == .auto ? AITheme.pink : .white.opacity(0.65))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help(chat.approvalMode == .auto
+        .help(account.approvalMode == .auto
               ? "Automático: escribe archivos y ejecuta comandos sin preguntar. Los comandos peligrosos (rm -rf, sudo, git push --force…) se preguntan igual."
               : "Preguntar: cada vez que quiera escribir, ejecutar o cambiar de carpeta, te pide aprobación.")
     }
@@ -287,22 +327,22 @@ struct ChatView: View {
     private var balance: some View {
         HStack(spacing: 6) {
             Image(systemName: "wallet.bifold")
-            Text(chat.balance.map { "Saldo: \($0.summary)" } ?? (chat.isRefreshingBalance ? "Consultando saldo…" : "Saldo no disponible"))
+            Text(account.balance.map(\.summary) ?? (account.isRefreshingBalance ? "Consultando…" : "Sin saldo"))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            if chat.balanceError != nil {
+            if account.balanceError != nil {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(AITheme.pink)
             }
             Spacer(minLength: 0)
-            Button(action: chat.refreshBalance) {
+            Button(action: account.refreshBalance) {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain)
-            .disabled(chat.isRefreshingBalance)
+            .disabled(account.isRefreshingBalance)
             .accessibilityLabel("Actualizar saldo de DeepSeek")
         }
-        .help(chat.balanceError.map { "No se pudo actualizar: \($0). El saldo mostrado puede estar desactualizado." }
+        .help(account.balanceError.map { "No se pudo actualizar: \($0). El saldo mostrado puede estar desactualizado." }
               ?? "Saldo de tu cuenta DeepSeek. Se actualiza al abrir el chat y después de cada consulta.")
     }
 
@@ -328,7 +368,7 @@ struct ChatView: View {
                 .foregroundStyle(AITheme.accent)
             Text("Falta tu API key de DeepSeek")
                 .font(.system(size: 13, weight: .medium))
-            Button(action: chat.openSettings) {
+            Button(action: account.openSettings) {
                 Text("Configurar API key")
                     .font(.system(size: 12, weight: .semibold))
                     .padding(.horizontal, 14)
@@ -352,7 +392,7 @@ struct ChatView: View {
                     .foregroundStyle(.white.opacity(0.75))
             }
             .buttonStyle(.plain)
-            .disabled(!chat.hasAPIKey || chat.isReadingImage)
+            .disabled(!account.hasAPIKey || chat.isReadingImage)
             .help("Adjuntar una imagen (o arrastrala acá, o pegala con ⌘V): extraigo su texto")
             .accessibilityLabel("Adjuntar imagen")
 
@@ -361,7 +401,7 @@ struct ChatView: View {
                 .font(.system(size: 13))
                 .focused($isInputFocused)
                 .onSubmit { chat.send() }
-                .disabled(!chat.hasAPIKey)
+                .disabled(!account.hasAPIKey)
 
             Button {
                 chat.isStreaming ? chat.stop() : chat.send()
@@ -591,6 +631,79 @@ private struct ApprovalCard: View {
                 .strokeBorder(AITheme.accent, lineWidth: 1)
                 .opacity(0.6)
         )
+    }
+}
+
+/// Una pestaña: carpeta y estado (respondiendo, o esperando aprobación o contraseña).
+private struct TabChip: View {
+    @ObservedObject var tab: ChatSession
+    @ObservedObject var workspace: Workspace
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if tab.needsAttention {
+                Circle().fill(AITheme.pink).frame(width: 6, height: 6)
+            } else if tab.isStreaming {
+                Circle().fill(AITheme.cyan).frame(width: 6, height: 6)
+            }
+            Text(workspace.directory.lastPathComponent)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if isSelected {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .buttonStyle(.plain)
+                .help("Cerrar pestaña (⌘W): corta la respuesta y cierra sus sesiones de terminal")
+            }
+        }
+        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+        .foregroundStyle(.white.opacity(isSelected ? 0.95 : 0.6))
+        .padding(.horizontal, 9)
+        .padding(.vertical, 3)
+        .frame(maxWidth: 150)
+        .background(.white.opacity(isSelected ? 0.14 : 0.05), in: Capsule())
+        .contentShape(Capsule())
+        .onTapGesture(perform: onSelect)
+        .help(tabHelp)
+    }
+
+    private var tabHelp: String {
+        let state = tab.needsAttention ? "Esperando tu aprobación o contraseña" : tab.isStreaming ? "Respondiendo…" : nil
+        return [workspace.displayPath, workspace.git.map { "⎇ \($0.branch)" }, state].compactMap { $0 }.joined(separator: "\n")
+    }
+}
+
+/// Rama de git de la carpeta de trabajo; un punto si hay cambios sin commitear.
+private struct GitBadge: View {
+    let git: GitInfo
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.branch")
+            Text(git.branch)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 110, alignment: .leading)
+            if git.hasChanges == true {
+                Circle().fill(AITheme.pink).frame(width: 5, height: 5)
+            }
+        }
+        .help(help)
+    }
+
+    private var help: String {
+        let head = git.isDetached ? "HEAD separado en \(git.branch)" : "Rama \(git.branch)"
+        let changes = switch git.hasChanges {
+        case true?: "Hay cambios sin commitear"
+        case false?: "Sin cambios pendientes"
+        case nil: "Revisando cambios…"
+        }
+        return "\(head)\n\(changes)\nRepositorio: \((git.root.path as NSString).abbreviatingWithTildeInPath)"
     }
 }
 

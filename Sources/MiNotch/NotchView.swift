@@ -3,7 +3,7 @@ import SwiftUI
 /// Estado compartido entre el panel (que detecta el hover) y la vista (que lo dibuja).
 @MainActor
 final class NotchState: ObservableObject {
-    static let expandedSize = CGSize(width: 500, height: 360)
+    static let expandedSize = CGSize(width: 500, height: 380)
     static let collapsedWidth: CGFloat = 200
     /// Espacio libre entre la píldora en reposo y el borde inferior de la barra de menú.
     static let gapToWindows: CGFloat = 4
@@ -31,7 +31,7 @@ final class NotchState: ObservableObject {
 
 struct NotchView: View {
     @ObservedObject var state: NotchState
-    @ObservedObject var chat: ChatSession
+    @ObservedObject var tabs: ChatTabs
 
     private var size: CGSize {
         state.isExpanded ? NotchState.expandedSize : state.collapsedSize
@@ -58,7 +58,13 @@ struct NotchView: View {
                 // Tamaño fijo: durante la animación la píldora lo va recortando en vez de re-maquetarlo.
                 ZStack(alignment: .top) {
                     AIBackgroundTint()
-                    ChatView(chat: chat, workspace: chat.workspace, terminals: chat.terminals, topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted)
+                    let chat = tabs.selected
+                    ChatView(
+                        tabs: tabs, chat: chat, account: tabs.account, workspace: chat.workspace, terminals: chat.terminals,
+                        topInset: state.collapsedSize.height, isDropTargeted: $state.isDropTargeted
+                    )
+                    // Cada pestaña con su foco y su scroll.
+                    .id(chat.id)
                 }
                 .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
                 .transition(.opacity)
@@ -68,8 +74,8 @@ struct NotchView: View {
         .overlay {
             // Siempre con colores de IA. Estático en reposo (0 % de CPU); gira mientras responde.
             // Quieto mientras espera al usuario (aprobación o contraseña): puede ser mucho rato.
-            GlowBorder(shape: shape, isAnimating: chat.isStreaming && chat.pendingApproval == nil && chat.pendingSecret == nil)
-                .opacity(chat.isStreaming ? 1 : 0.75)
+            GlowBorder(shape: shape, isAnimating: tabs.isAnyWorking)
+                .opacity(tabs.isAnyWorking ? 1 : 0.75)
         }
         .frame(width: size.width, height: size.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

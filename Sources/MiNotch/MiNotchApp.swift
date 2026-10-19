@@ -24,15 +24,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotZones: [NSRect] = []
     private let screenManager = ScreenManager()
     private let mouseTracker = MouseTracker()
-    /// Una sola conversación, compartida por las píldoras de todas las pantallas.
-    private let chat = ChatSession()
-    private lazy var settings = SettingsWindowController(chat: chat)
+    /// Cuenta compartida y pestañas: las mismas en las píldoras de todas las pantallas.
+    private let account = DeepSeekAccount()
+    private lazy var tabs = ChatTabs(account: account)
+    private lazy var settings = SettingsWindowController(account: account)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupMainMenu()
         handleTerminationSignal()
-        chat.onOpenSettings = { [weak self] in self?.openSettings() }
+        account.onOpenSettings = { [weak self] in self?.openSettings() }
 
         screenManager.onScreensChange = { [weak self] screens in
             self?.syncPanels(with: screens)
@@ -56,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Que no queden ssh u otras sesiones del asistente corriendo sin dueño.
-        chat.terminals.closeAll()
+        tabs.closeAllTerminals()
     }
 
     private func routeMouse(at point: NSPoint) {
@@ -71,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var updated: [CGDirectDisplayID: NotchPanel] = [:]
         for screen in screens {
             guard let id = screen.displayID else { continue }
-            let panel = panels.removeValue(forKey: id) ?? NotchPanel(chat: chat)
+            let panel = panels.removeValue(forKey: id) ?? NotchPanel(tabs: tabs)
             panel.position(on: screen)
             panel.orderFrontRegardless()
             updated[id] = panel
@@ -107,10 +108,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         edit.addItem(withTitle: "Pegar", action: #selector(pasteOrAttachImage(_:)), keyEquivalent: "v").target = self
         edit.addItem(withTitle: "Seleccionar todo", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        let tabsMenu = NSMenu(title: "Pestañas")
+        tabsMenu.addItem(withTitle: "Nueva pestaña", action: #selector(newTab), keyEquivalent: "t").target = self
+        tabsMenu.addItem(withTitle: "Cerrar pestaña", action: #selector(closeTabOrWindow), keyEquivalent: "w").target = self
+        tabsMenu.addItem(withTitle: "Pestaña siguiente", action: #selector(nextTab), keyEquivalent: "]").target = self
+        tabsMenu.addItem(withTitle: "Pestaña anterior", action: #selector(previousTab), keyEquivalent: "[").target = self
+
         let editItem = NSMenuItem()
         editItem.submenu = edit
+        let tabsItem = NSMenuItem()
+        tabsItem.submenu = tabsMenu
         let mainMenu = NSMenu()
         mainMenu.addItem(editItem)
+        mainMenu.addItem(tabsItem)
         NSApp.mainMenu = mainMenu
     }
 
@@ -118,10 +128,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.show()
     }
 
+    // Atajos de pestañas: funcionan con el notch abierto y el teclado en él.
+    @objc private func newTab() {
+        tabs.newTab()
+    }
+
+    /// ⌘W: en el notch cierra la pestaña; en otra ventana (Configuración), la ventana.
+    @objc private func closeTabOrWindow() {
+        if NSApp.keyWindow is NotchPanel {
+            tabs.closeSelected()
+        } else {
+            NSApp.keyWindow?.performClose(nil)
+        }
+    }
+
+    @objc private func nextTab() {
+        tabs.selectAdjacent(1)
+    }
+
+    @objc private func previousTab() {
+        tabs.selectAdjacent(-1)
+    }
+
     /// Cmd+V en el notch: una imagen copiada se adjunta (se extrae su texto); el texto se pega como siempre.
     @objc private func pasteOrAttachImage(_ sender: Any?) {
         if NSApp.keyWindow is NotchPanel, let image = ImageTextReader.image(from: .general) {
-            chat.attachImage(image)
+            tabs.selected.attachImage(image)
         } else {
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
         }

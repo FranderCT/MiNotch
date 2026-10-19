@@ -7,7 +7,7 @@ import SwiftUI
 final class NotchPanel: NSPanel {
     private let state = NotchState()
 
-    init(chat: ChatSession) {
+    init(tabs: ChatTabs) {
         super.init(
             contentRect: NSRect(origin: .zero, size: NotchState.expandedSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -31,7 +31,7 @@ final class NotchPanel: NSPanel {
         // Click-through mientras el mouse no esté sobre la píldora.
         ignoresMouseEvents = true
 
-        let hosting = FirstClickHostingView(rootView: NotchView(state: state, chat: chat))
+        let hosting = FirstClickHostingView(rootView: NotchView(state: state, tabs: tabs))
         hosting.frame = NSRect(origin: .zero, size: NotchState.expandedSize)
         contentView = hosting
     }

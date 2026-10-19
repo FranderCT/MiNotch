@@ -7,11 +7,11 @@ struct DeepSeekClient: Sendable {
     static let modelDefaultsKey = "deepseekModel"
 
     private static let endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
-    private static func systemPrompt(workingDirectory: URL) -> String {
+    private static func systemPrompt(workingDirectory: URL, git: GitInfo?) -> String {
         """
         Sos un asistente de programación que vive en el notch de una Mac. Trabajás en la carpeta \
         \(workingDirectory.path) y tenés herramientas para listar, leer, buscar, crear y editar archivos \
-        y ejecutar comandos de zsh ahí.
+        y ejecutar comandos de zsh ahí. \(git?.summary ?? "No es un repositorio git.")
         - Las rutas relativas son relativas a esa carpeta; no podés tocar archivos fuera de ella \
         (para trabajar en otra, usá change_directory).
         - Crear o editar archivos, ejecutar comandos y cambiar de carpeta requieren que el usuario apruebe \
@@ -35,11 +35,11 @@ struct DeepSeekClient: Sendable {
     let model: String
 
     /// Emite los fragmentos de la respuesta a medida que llegan: texto, razonamiento y llamadas a herramientas.
-    func stream(_ history: [ChatMessage], workingDirectory: URL) -> AsyncThrowingStream<DeepSeekStreamEvent, Error> {
+    func stream(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?) -> AsyncThrowingStream<DeepSeekStreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let request = try makeRequest(history, workingDirectory: workingDirectory)
+                    let request = try makeRequest(history, workingDirectory: workingDirectory, git: git)
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw DeepSeekError.invalidResponse }
                     guard http.statusCode == 200 else {
@@ -91,8 +91,8 @@ struct DeepSeekClient: Sendable {
         return try JSONDecoder().decode(DeepSeekBalance.self, from: data)
     }
 
-    private func makeRequest(_ history: [ChatMessage], workingDirectory: URL) throws -> URLRequest {
-        let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt(workingDirectory: workingDirectory))]
+    private func makeRequest(_ history: [ChatMessage], workingDirectory: URL, git: GitInfo?) throws -> URLRequest {
+        let messages = [RequestBody.Message(role: "system", content: Self.systemPrompt(workingDirectory: workingDirectory, git: git))]
             + history.map { RequestBody.Message($0) }
 
         var request = URLRequest(url: Self.endpoint)

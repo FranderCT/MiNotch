@@ -1,6 +1,6 @@
 import AppKit
 
-/// Carpeta donde trabaja el asistente: lee, escribe y ejecuta comandos solo dentro de ella.
+/// Carpeta donde trabaja el asistente de una pestaña: lee, escribe y ejecuta comandos solo dentro de ella.
 @MainActor
 final class Workspace: ObservableObject {
     static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -11,16 +11,22 @@ final class Workspace: ObservableObject {
     private static let maxRecents = 8
 
     @Published private(set) var directory: URL
-    /// Carpetas usadas, la más reciente primero (incluye la actual).
-    @Published private(set) var recents: [URL]
+    /// Repositorio git que contiene la carpeta, o nil si no está en uno.
+    @Published private(set) var git: GitInfo?
+    private var gitStatusTask: Task<Void, Never>?
 
-    init() {
-        let defaults = UserDefaults.standard
-        let saved = defaults.string(forKey: Self.directoryKey).map { URL(fileURLWithPath: $0, isDirectory: true) }
-        let directory = saved.flatMap { Self.isDirectory($0) ? $0 : nil } ?? Self.defaultDirectory
+    /// Sin `directory`: la última carpeta usada (o la de por defecto).
+    init(directory: URL? = nil) {
+        let saved = UserDefaults.standard.string(forKey: Self.directoryKey).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        let directory = [directory, saved].compactMap { $0 }.first(where: Self.isDirectory) ?? Self.defaultDirectory
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         self.directory = directory
-        recents = (defaults.stringArray(forKey: Self.recentsKey) ?? [])
+        refreshGit()
+    }
+
+    /// Carpetas usadas, la más reciente primero (incluye la actual). Compartidas entre pestañas.
+    var recents: [URL] {
+        (UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [])
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
             .filter(Self.isDirectory)
     }
@@ -34,9 +40,10 @@ final class Workspace: ObservableObject {
         let url = url.standardizedFileURL
         guard Self.isDirectory(url) else { return }
         directory = url
-        recents = Array(([url] + recents.filter { $0.path != url.path }).prefix(Self.maxRecents))
+        let recents = ([url] + recents.filter { $0.path != url.path }).prefix(Self.maxRecents)
         UserDefaults.standard.set(url.path, forKey: Self.directoryKey)
         UserDefaults.standard.set(recents.map(\.path), forKey: Self.recentsKey)
+        refreshGit()
     }
 
     func chooseDirectory() {
@@ -60,5 +67,96 @@ final class Workspace: ObservableObject {
     nonisolated static func isDirectory(_ url: URL) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    // MARK: - Git
+
+    /// La rama se lee al instante (es un archivo); si hay cambios sin commitear, con `git status` en segundo plano.
+    /// Se llama al abrir el notch, al cambiar de carpeta o de pestaña y al terminar cada respuesta.
+    func refreshGit() {
+        gitStatusTask?.cancel()
+        guard var info = GitInfo.read(at: directory) else {
+            git = nil
+            return
+        }
+        // Mientras llega el estado nuevo, se conserva el anterior si es el mismo repo.
+        if let current = git, current.root == info.root {
+            info.hasChanges = current.hasChanges
+        }
+        git = info
+        let root = info.root
+        gitStatusTask = Task { [weak self] in
+            let hasChanges = await GitInfo.hasChanges(at: root)
+            guard let self, !Task.isCancelled, self.git?.root == root else { return }
+            self.git?.hasChanges = hasChanges
+        }
+    }
+}
+
+/// Rama y estado del repositorio git que contiene una carpeta.
+struct GitInfo: Equatable, Sendable {
+    /// Carpeta raíz del repositorio (la que tiene .git).
+    let root: URL
+    /// Nombre de la rama, o el commit abreviado si HEAD está separado.
+    let branch: String
+    let isDetached: Bool
+    /// nil mientras no se sabe.
+    var hasChanges: Bool?
+
+    /// Una línea para el system prompt.
+    var summary: String {
+        let head = isDetached ? "HEAD separado en el commit \(branch)" : "rama \(branch)"
+        let changes = switch hasChanges {
+        case true?: ", con cambios sin commitear"
+        case false?: ", sin cambios pendientes"
+        case nil: ""
+        }
+        return "Está dentro del repositorio git \(root.path) (\(head)\(changes))."
+    }
+
+    /// Busca .git subiendo desde `directory` y lee HEAD. Sin procesos: es rápido.
+    static func read(at directory: URL) -> GitInfo? {
+        var folder = directory.standardizedFileURL
+        while true {
+            let dotGit = folder.appendingPathComponent(".git")
+            if let gitDir = gitDirectory(dotGit), let head = try? String(contentsOf: gitDir.appendingPathComponent("HEAD"), encoding: .utf8) {
+                let head = head.trimmingCharacters(in: .whitespacesAndNewlines)
+                if head.hasPrefix("ref: ") {
+                    let ref = head.dropFirst(5)
+                    let branch = ref.hasPrefix("refs/heads/") ? String(ref.dropFirst(11)) : String(ref)
+                    return GitInfo(root: folder, branch: branch, isDetached: false)
+                }
+                return GitInfo(root: folder, branch: String(head.prefix(7)), isDetached: true)
+            }
+            let parent = folder.deletingLastPathComponent()
+            if parent.path == folder.path { return nil }
+            folder = parent
+        }
+    }
+
+    /// `.git` es una carpeta, o un archivo "gitdir: …" en worktrees y submódulos.
+    private static func gitDirectory(_ dotGit: URL) -> URL? {
+        if Workspace.isDirectory(dotGit) { return dotGit }
+        guard let text = try? String(contentsOf: dotGit, encoding: .utf8), text.hasPrefix("gitdir:") else { return nil }
+        let path = text.dropFirst(7).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.hasPrefix("/")
+            ? URL(fileURLWithPath: path)
+            : dotGit.deletingLastPathComponent().appendingPathComponent(path).standardizedFileURL
+    }
+
+    /// `git status --porcelain`: cualquier línea es un cambio (incluye archivos nuevos). nil si git falla.
+    static func hasChanges(at root: URL) async -> Bool? {
+        await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = ["-C", root.path, "status", "--porcelain"]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return process.terminationStatus == 0 ? !data.isEmpty : nil
+        }.value
     }
 }
