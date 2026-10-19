@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupMainMenu()
+        handleTerminationSignal()
         chat.onOpenSettings = { [weak self] in self?.openSettings() }
 
         screenManager.onScreensChange = { [weak self] screens in
@@ -42,6 +43,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.routeMouse(at: point)
         }
         mouseTracker.start()
+    }
+
+    /// SIGTERM (pkill, build-app.sh) cierra como "Salir": si no, las sesiones de terminal quedan huérfanas.
+    private let terminationSignal = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+
+    private func handleTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        terminationSignal.setEventHandler { NSApp.terminate(nil) }
+        terminationSignal.resume()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
