@@ -57,6 +57,10 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var title: String?
     /// Para coordinar otras pestañas (tab_list, tab_open, tab_send…).
     weak var tabs: ChatTabs?
+    /// Agente (chat) o Terminal (el shell de la pestaña); se cambia en cualquier momento.
+    @Published var mode: TabMode = .agent
+    /// Terminal visible de la pestaña, compartida con el asistente (sesión 0).
+    let shell = TabShell()
     @Published private(set) var messages: [ChatMessage] = []
     @Published var input = ""
     @Published private(set) var isStreaming = false
@@ -106,6 +110,18 @@ final class ChatSession: ObservableObject, Identifiable {
     /// Necesita al usuario: una aprobación o una contraseña.
     var needsAttention: Bool {
         pendingApproval != nil || pendingSecret != nil
+    }
+
+    func toggleMode() {
+        mode = mode == .agent ? .terminal : .agent
+        if mode == .terminal { shell.startIfNeeded(in: workspace.directory) }
+    }
+
+    /// Al cerrar la pestaña: corta la respuesta y cierra el shell y las sesiones del asistente.
+    func shutDown() {
+        stop()
+        terminals.closeAll()
+        shell.terminate()
     }
 
     /// Nombre para mostrar: el título o, si no tiene, la carpeta.
@@ -396,6 +412,9 @@ final class ChatSession: ObservableObject, Identifiable {
             }
         }
 
+        if args["session"] == "0" {
+            return await runShellTool(tool, args, maxWait: wait)
+        }
         guard let id = Int(args["session"] ?? ""), let session = terminals.session(id) else {
             let open = terminals.sessions.map { "\($0.id) (\($0.command))" }.joined(separator: ", ")
             return ToolOutcome(text: "No existe la sesión \(args["session"] ?? ""). Abiertas: \(open.isEmpty ? "ninguna" : open).", failed: true)
@@ -414,6 +433,32 @@ final class ChatSession: ObservableObject, Identifiable {
         default:
             return ToolOutcome(text: await collectOutput(of: session, maxWait: wait))
         }
+    }
+
+    /// Sesión 0: la terminal visible de la pestaña, la misma que usa el usuario en modo Terminal.
+    private func runShellTool(_ tool: AgentTool, _ args: [String: String], maxWait: TimeInterval) async -> ToolOutcome {
+        switch tool {
+        case .terminalSend:
+            let enter = args["enter"]?.lowercased() != "false"
+            shell.write((args["input"] ?? "") + (enter ? "\r" : ""), in: workspace.directory)
+        case .terminalClose:
+            return ToolOutcome(text: "La sesión 0 es la terminal de la pestaña: no se cierra. Para salir de un ssh ahí, mandá exit.", failed: true)
+        default:
+            guard shell.isRunning else {
+                return ToolOutcome(text: "La terminal de la pestaña todavía no está abierta: escribí en ella con terminal_send (session 0).")
+            }
+        }
+        var screen = await shell.readScreen(maxWait: maxWait)
+        for _ in 0..<3 {
+            guard shell.isRunning, let prompt = TerminalSession.secretPrompt(in: screen) else { break }
+            guard let secret = await requestSecret(SecretRequest(sessionID: 0, command: "terminal de la pestaña", prompt: prompt)) else {
+                screen += "\n[El usuario no ingresó la contraseña.]"
+                break
+            }
+            shell.write(secret + "\r", in: workspace.directory)
+            screen = await shell.readScreen(maxWait: maxWait).replacingOccurrences(of: secret, with: "••••")
+        }
+        return ToolOutcome(text: "Pantalla de la terminal de la pestaña (últimas líneas):\n\(screen)")
     }
 
     /// Lee la salida nueva y, si termina pidiendo una contraseña, se la pide al usuario (no al modelo).
@@ -487,7 +532,7 @@ final class ChatSession: ObservableObject, Identifiable {
     func clear() {
         stop()
         conversationID = UUID()
-        // El asistente nuevo no sabría que existen.
+        // El asistente nuevo no sabría que existen. La terminal de la pestaña (sesión 0) es del usuario: sigue.
         terminals.closeAll()
         messages.removeAll()
         errorMessage = nil
@@ -516,6 +561,14 @@ final class ChatSession: ObservableObject, Identifiable {
             messages[last].isComplete = true
         }
     }
+}
+
+/// Lo que muestra una pestaña.
+enum TabMode: Sendable {
+    /// Chat con el asistente.
+    case agent
+    /// El shell de la pestaña, para escribir en él directamente.
+    case terminal
 }
 
 /// Pedido de contraseña de una sesión de terminal.

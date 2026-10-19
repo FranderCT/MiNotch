@@ -319,7 +319,7 @@ enum AgentTool: String, CaseIterable, Sendable {
             let enter = args["enter"]?.lowercased() != "false"
             return ToolApproval(
                 icon: icon,
-                title: "Escribir en la sesión \(args["session"] ?? "?")",
+                title: args["session"] == "0" ? "Escribir en la terminal de la pestaña" : "Escribir en la sesión \(args["session"] ?? "?")",
                 detail: Self.visibleInput(args["input"] ?? "") + (enter ? " ⏎" : ""),
                 riskReason: Self.riskReason(args["input"] ?? "")
             )

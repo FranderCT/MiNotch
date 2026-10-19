@@ -1,15 +1,17 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Panel sin bordes, transparente y no activable que aloja la píldora.
-/// Siempre mide el tamaño expandido; la píldora se dibuja arriba al centro dentro de él.
+/// Mide el tamaño expandido del modo actual (agente o terminal); la píldora se dibuja arriba al centro.
 @MainActor
 final class NotchPanel: NSPanel {
     private let state = NotchState()
+    private var modeObserver: AnyCancellable?
 
     init(tabs: ChatTabs) {
         super.init(
-            contentRect: NSRect(origin: .zero, size: NotchState.expandedSize),
+            contentRect: NSRect(origin: .zero, size: NotchState.agentSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -32,8 +34,20 @@ final class NotchPanel: NSPanel {
         ignoresMouseEvents = true
 
         let hosting = FirstClickHostingView(rootView: NotchView(state: state, tabs: tabs))
-        hosting.frame = NSRect(origin: .zero, size: NotchState.expandedSize)
+        hosting.frame = NSRect(origin: .zero, size: NotchState.agentSize)
+        hosting.autoresizingMask = [.width, .height]
         contentView = hosting
+
+        modeObserver = tabs.$isTerminalMode.removeDuplicates().sink { [weak self] isTerminal in
+            self?.resize(to: isTerminal ? NotchState.terminalSize : NotchState.agentSize)
+        }
+    }
+
+    /// Cambia el tamaño sin moverse del centro superior.
+    private func resize(to size: CGSize) {
+        guard state.expandedSize != size else { return }
+        state.expandedSize = size
+        setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.maxY - size.height, width: size.width, height: size.height), display: true)
     }
 
     override var canBecomeKey: Bool { true }
@@ -42,7 +56,7 @@ final class NotchPanel: NSPanel {
     /// Centra el panel pegado al borde superior de la pantalla.
     func position(on screen: NSScreen) {
         state.fit(to: screen)
-        let size = NotchState.expandedSize
+        let size = state.expandedSize
         let origin = NSPoint(
             x: screen.frame.midX - size.width / 2,
             y: screen.frame.maxY - size.height
@@ -57,7 +71,7 @@ final class NotchPanel: NSPanel {
 
     /// Rectángulo visible de la píldora en coordenadas de pantalla.
     private var pillRect: NSRect {
-        let size = state.isExpanded ? NotchState.expandedSize : state.collapsedSize
+        let size = state.isExpanded ? state.expandedSize : state.collapsedSize
         return NSRect(
             x: frame.midX - size.width / 2,
             y: frame.maxY - size.height,

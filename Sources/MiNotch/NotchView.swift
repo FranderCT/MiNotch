@@ -3,12 +3,16 @@ import SwiftUI
 /// Estado compartido entre el panel (que detecta el hover) y la vista (que lo dibuja).
 @MainActor
 final class NotchState: ObservableObject {
-    static let expandedSize = CGSize(width: 500, height: 380)
+    static let agentSize = CGSize(width: 500, height: 380)
+    /// Modo Terminal: ~100 columnas × 26 filas.
+    static let terminalSize = CGSize(width: 720, height: 440)
     static let collapsedWidth: CGFloat = 200
     /// Espacio libre entre la píldora en reposo y el borde inferior de la barra de menú.
     static let gapToWindows: CGFloat = 4
 
     @Published var isExpanded = false
+    /// Según el modo de la pestaña seleccionada.
+    @Published var expandedSize = agentSize
     @Published var isDropTargeted = false
     /// Se ajusta a la altura de la barra de menú de la pantalla actual.
     @Published var collapsedSize = CGSize(width: collapsedWidth, height: 26)
@@ -34,7 +38,7 @@ struct NotchView: View {
     @ObservedObject var tabs: ChatTabs
 
     private var size: CGSize {
-        state.isExpanded ? NotchState.expandedSize : state.collapsedSize
+        state.isExpanded ? state.expandedSize : state.collapsedSize
     }
 
     private var cornerRadius: CGFloat {
@@ -66,7 +70,7 @@ struct NotchView: View {
                     // Cada pestaña con su foco y su scroll.
                     .id(chat.id)
                 }
-                .frame(width: NotchState.expandedSize.width, height: NotchState.expandedSize.height)
+                .frame(width: state.expandedSize.width, height: state.expandedSize.height)
                 .transition(.opacity)
             }
         }
@@ -80,5 +84,6 @@ struct NotchView: View {
         .frame(width: size.width, height: size.height)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .animation(.spring(response: 0.38, dampingFraction: 0.72), value: state.isExpanded)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.expandedSize)
     }
 }

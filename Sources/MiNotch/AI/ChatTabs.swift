@@ -12,6 +12,8 @@ final class ChatTabs: ObservableObject {
     @Published private(set) var selectedID: UUID
     /// Alguna pestaña está respondiendo sin esperar al usuario: el borde gira.
     @Published private(set) var isAnyWorking = false
+    /// La pestaña seleccionada está en modo Terminal: el notch se agranda.
+    @Published private(set) var isTerminalMode = false
     /// Pestañas esperando una aprobación o contraseña del usuario.
     @Published private(set) var needingAttention: [ChatSession] = []
     private var observers: [UUID: AnyCancellable] = [:]
@@ -58,6 +60,7 @@ final class ChatTabs: ObservableObject {
         tabs.insert(tab, at: select ? (tabs.firstIndex { $0.id == selectedID } ?? tabs.count - 1) + 1 : tabs.count)
         observe(tab)
         if select { selectedID = tab.id }
+        updateWorking()
         return tab
     }
 
@@ -69,8 +72,7 @@ final class ChatTabs: ObservableObject {
     func close(_ id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         let tab = tabs[index]
-        tab.stop()
-        tab.terminals.closeAll()
+        tab.shutDown()
         observers[id] = nil
         tabs.remove(at: index)
         if tabs.isEmpty {
@@ -93,6 +95,7 @@ final class ChatTabs: ObservableObject {
         guard tabs.contains(where: { $0.id == id }) else { return }
         selectedID = id
         selected.workspace.refreshGit()
+        updateWorking()
     }
 
     /// `offset` 1 = siguiente, -1 = anterior; da la vuelta.
@@ -101,14 +104,15 @@ final class ChatTabs: ObservableObject {
         select(tabs[(index + offset + tabs.count) % tabs.count].id)
     }
 
-    func closeAllTerminals() {
-        tabs.forEach { $0.terminals.closeAll() }
+    /// Al salir de la app: que no queden shells, ssh ni sesiones del asistente sin dueño.
+    func shutDownAll() {
+        tabs.forEach { $0.shutDown() }
     }
 
     private func observe(_ tab: ChatSession) {
         tab.tabs = self
         observers[tab.id] = tab.$isStreaming
-            .combineLatest(tab.$pendingApproval, tab.$pendingSecret)
+            .combineLatest(tab.$pendingApproval, tab.$pendingSecret, tab.$mode)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateWorking() }
     }
@@ -116,6 +120,8 @@ final class ChatTabs: ObservableObject {
     private func updateWorking() {
         let working = tabs.contains(where: \.isWorking)
         if working != isAnyWorking { isAnyWorking = working }
+        let terminal = selected.mode == .terminal
+        if terminal != isTerminalMode { isTerminalMode = terminal }
         let attention = tabs.filter(\.needsAttention)
         if attention.map(\.id) != needingAttention.map(\.id) { needingAttention = attention }
     }

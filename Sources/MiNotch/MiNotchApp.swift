@@ -20,8 +20,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     /// Un panel por pantalla conectada.
     private var panels: [CGDirectDisplayID: NotchPanel] = [:]
-    /// Áreas de todos los paneles: fuera de ellas el movimiento del mouse se descarta enseguida.
-    private var hotZones: [NSRect] = []
     private let screenManager = ScreenManager()
     private let mouseTracker = MouseTracker()
     /// Cuenta compartida y pestañas: las mismas en las píldoras de todas las pantallas.
@@ -57,12 +55,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Que no queden ssh u otras sesiones del asistente corriendo sin dueño.
-        tabs.closeAllTerminals()
+        tabs.shutDownAll()
     }
 
     private func routeMouse(at point: NSPoint) {
         // Camino rápido: cursor lejos de todas las píldoras y ninguna expandida que deba cerrarse.
-        guard hotZones.contains(where: { $0.containsInclusive(point) })
+        // Los marcos cambian con el modo (agente o terminal): se leen en el momento.
+        guard panels.values.contains(where: { $0.frame.containsInclusive(point) })
             || panels.values.contains(where: \.isExpanded) else { return }
         panels.values.forEach { $0.updateHover(mouse: point) }
     }
@@ -79,7 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         panels.values.forEach { $0.close() }
         panels = updated
-        hotZones = updated.values.map(\.frame)
     }
 
     private func setupStatusItem() {
@@ -113,6 +111,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tabsMenu.addItem(withTitle: "Cerrar pestaña", action: #selector(closeTabOrWindow), keyEquivalent: "w").target = self
         tabsMenu.addItem(withTitle: "Pestaña siguiente", action: #selector(nextTab), keyEquivalent: "]").target = self
         tabsMenu.addItem(withTitle: "Pestaña anterior", action: #selector(previousTab), keyEquivalent: "[").target = self
+        tabsMenu.addItem(.separator())
+        tabsMenu.addItem(withTitle: "Agente / Terminal", action: #selector(toggleMode), keyEquivalent: "e").target = self
 
         let editItem = NSMenuItem()
         editItem.submenu = edit
@@ -142,6 +142,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func toggleMode() {
+        tabs.selected.toggleMode()
+    }
+
     @objc private func nextTab() {
         tabs.selectAdjacent(1)
     }
@@ -152,7 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Cmd+V en el notch: una imagen copiada se adjunta (se extrae su texto); el texto se pega como siempre.
     @objc private func pasteOrAttachImage(_ sender: Any?) {
-        if NSApp.keyWindow is NotchPanel, let image = ImageTextReader.image(from: .general) {
+        // En modo Terminal se pega como en cualquier terminal.
+        if NSApp.keyWindow is NotchPanel, tabs.selected.mode == .agent, let image = ImageTextReader.image(from: .general) {
             tabs.selected.attachImage(image)
         } else {
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)

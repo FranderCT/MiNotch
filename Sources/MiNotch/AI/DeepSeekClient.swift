@@ -18,6 +18,10 @@ struct DeepSeekClient: Sendable {
         cada acción. Si rechaza una, no insistas: preguntá cómo seguir.
         - Antes de editar un archivo, leelo. Para cambios puntuales usá edit_file; write_file para archivos \
         nuevos o reescrituras completas.
+        - La sesión 0 es la terminal visible de esta pestaña: la misma que usa el usuario en modo Terminal \
+        (existe aunque no aparezca en las sesiones abiertas). Cuando el usuario hable de "la terminal" o de algo \
+        que hizo ahí (por ejemplo, un ssh que abrió él), usá terminal_send y terminal_read con session "0": \
+        devuelven las últimas líneas de la pantalla.
         - Para comandos locales que terminan solos usá run_command. Para ssh y todo lo interactivo (sudo, \
         REPLs, programas que preguntan algo) usá las sesiones de terminal: terminal_start, terminal_send, \
         terminal_read y terminal_close. Si aparece un pedido de contraseña o passphrase, el usuario la escribe \

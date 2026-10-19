@@ -23,9 +23,13 @@ struct ChatView: View {
         VStack(spacing: 10) {
             header
                 .frame(height: topInset)
-            if account.hasAPIKey {
-                tabStrip
-                statusBar
+            tabStrip
+            statusBar
+            if chat.mode == .terminal {
+                // La terminal no necesita API key: es un shell local.
+                TerminalHost(shell: chat.shell, directory: workspace.directory)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else if account.hasAPIKey {
                 conversation
             } else {
                 missingKey
@@ -39,14 +43,16 @@ struct ChatView: View {
             if let request = chat.pendingSecret {
                 secretCard(request)
             }
-            if chat.isReadingImage {
-                ReadingImageChip()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else if let imageText = chat.imageText {
-                ImageTextChip(text: imageText, wasTrimmed: chat.imageTextWasTrimmed, onRemove: chat.discardImageText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            if chat.mode == .agent {
+                if chat.isReadingImage {
+                    ReadingImageChip()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if let imageText = chat.imageText {
+                    ImageTextChip(text: imageText, wasTrimmed: chat.imageTextWasTrimmed, onRemove: chat.discardImageText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                inputBar
             }
-            inputBar
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)
@@ -112,11 +118,7 @@ struct ChatView: View {
     /// Extremos izquierdo y derecho: en la MacBook quedan a los lados del notch físico.
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(AITheme.accent)
-            Text("DeepSeek")
-                .font(.system(size: 12, weight: .semibold))
+            modeSwitch
 
             Spacer()
 
@@ -134,8 +136,42 @@ struct ChatView: View {
             .buttonStyle(.plain)
             .disabled(chat.messages.isEmpty)
             .opacity(chat.messages.isEmpty ? 0.3 : 1)
+            .help("Borrar la conversación de esta pestaña")
         }
         .padding(.horizontal, 6)
+    }
+
+    /// Agente ⇄ Terminal (⌘E). Comparten el shell: lo que hagas en uno lo ve el otro.
+    private var modeSwitch: some View {
+        HStack(spacing: 2) {
+            modeButton(.agent, icon: "sparkles", title: "Agente")
+            modeButton(.terminal, icon: "apple.terminal", title: "Terminal")
+        }
+        .padding(2)
+        .background(.white.opacity(0.08), in: Capsule())
+        .help("Agente o Terminal (⌘E). La terminal de la pestaña la comparten: el asistente la usa como sesión 0.")
+    }
+
+    private func modeButton(_ mode: TabMode, icon: String, title: String) -> some View {
+        let isSelected = chat.mode == mode
+        return Button {
+            if !isSelected { chat.toggleMode() }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(AITheme.accent) : AnyShapeStyle(.white.opacity(0.6)))
+                // Solo el seleccionado muestra el nombre: al lado del notch físico hay poco lugar.
+                if isSelected {
+                    Text(title)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(isSelected ? .white.opacity(0.12) : .clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 
     /// Sin los pasos del asistente que solo pidieron herramientas: esas se ven como filas propias.
@@ -661,6 +697,25 @@ private struct ApprovalCard: View {
                 .opacity(0.6)
         )
     }
+}
+
+/// La terminal de la pestaña (SwiftTerm). La vista vive en TabShell: cambiar de modo o de pestaña no la cierra.
+private struct TerminalHost: NSViewRepresentable {
+    let shell: TabShell
+    let directory: URL
+
+    func makeNSView(context: Context) -> ShellTerminalView {
+        shell.startIfNeeded(in: directory)
+        let view = shell.view
+        // Recién mostrada: el teclado va a la terminal.
+        DispatchQueue.main.async {
+            view.window?.makeKey()
+            view.window?.makeFirstResponder(view)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: ShellTerminalView, context: Context) {}
 }
 
 /// Una pestaña: carpeta y estado (respondiendo, o esperando aprobación o contraseña).
