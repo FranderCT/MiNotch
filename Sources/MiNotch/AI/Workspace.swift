@@ -139,9 +139,9 @@ struct GitInfo: Equatable, Sendable {
                 }
                 return GitInfo(root: folder, branch: String(head.prefix(7)), isDetached: true)
             }
-            let parent = folder.deletingLastPathComponent()
-            if parent.path == folder.path { return nil }
-            folder = parent
+            // En "/" deletingLastPathComponent() devuelve "/../" y nunca llega a un punto fijo.
+            if folder.path == "/" { return nil }
+            folder = folder.deletingLastPathComponent().standardizedFileURL
         }
     }
 
