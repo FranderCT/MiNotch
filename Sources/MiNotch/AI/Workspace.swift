@@ -84,6 +84,7 @@ final class Workspace: ObservableObject {
             info.hasChanges = current.hasChanges
             info.insertions = current.insertions
             info.deletions = current.deletions
+            info.changedFiles = current.changedFiles
         }
         git = info
         let root = info.root
@@ -93,6 +94,7 @@ final class Workspace: ObservableObject {
             self.git?.hasChanges = status?.hasChanges
             self.git?.insertions = status?.insertions ?? 0
             self.git?.deletions = status?.deletions ?? 0
+            self.git?.changedFiles = status?.changedFiles ?? 0
         }
     }
 }
@@ -109,6 +111,8 @@ struct GitInfo: Equatable, Sendable {
     /// Líneas agregadas y quitadas respecto del último commit (`git diff --shortstat HEAD`).
     var insertions = 0
     var deletions = 0
+    /// Archivos con cambios sin commitear (el número del chip "±").
+    var changedFiles = 0
 
     /// Una línea para el system prompt.
     var summary: String {
@@ -152,7 +156,7 @@ struct GitInfo: Equatable, Sendable {
     }
 
     /// Cambios sin commitear (`git status --porcelain`, incluye archivos nuevos) y líneas +/−. nil si git falla.
-    static func status(at root: URL) async -> (hasChanges: Bool, insertions: Int, deletions: Int)? {
+    static func status(at root: URL) async -> (hasChanges: Bool, insertions: Int, deletions: Int, changedFiles: Int)? {
         await Task.detached(priority: .utility) {
             guard let porcelain = run(["status", "--porcelain"], in: root) else { return nil }
             // "3 files changed, 326 insertions(+), 19 deletions(-)"; sin commits todavía, falla: 0 y 0.
@@ -161,7 +165,8 @@ struct GitInfo: Equatable, Sendable {
                 stat.firstMatch(of: try! Regex("(\\d+) \(word)"))
                     .flatMap { Int($0.output[1].substring ?? "") } ?? 0
             }
-            return (!porcelain.isEmpty, count("insertion"), count("deletion"))
+            let files = porcelain.split(separator: "\n").count
+            return (files > 0, count("insertion"), count("deletion"), files)
         }.value
     }
 

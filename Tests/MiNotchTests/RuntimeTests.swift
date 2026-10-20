@@ -50,7 +50,11 @@ struct RuntimeTests {
         for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
             precondition(transcript.components(separatedBy: "loaded:\(file)").count == 2, transcript)
         }
-        precondition(transcript.contains("\(integration.token);start\u{07}before"), transcript)
+        // start lleva el comando y la carpeta en base64 (la app los muestra; nunca los interpreta).
+        let encodedCommand = Data("print before; sleep 1.5; false".utf8).base64EncodedString()
+        precondition(transcript.contains("\(integration.token);start;\(encodedCommand);"), transcript)
+        precondition(transcript.contains("\u{07}before"), transcript)
+        precondition(transcript.contains("\(integration.token);cwd;"), transcript)
         precondition(transcript.contains("\(integration.token);ready;1\u{07}"), transcript)
         precondition(transcript.contains("\(integration.token);ready;127\u{07}"), transcript)
         precondition(transcript.contains("restored:\(root.path) previous:1"), transcript)

@@ -1,3 +1,4 @@
+import Combine
 import CoreGraphics
 import Foundation
 
@@ -61,6 +62,7 @@ final class ChatSession: ObservableObject, Identifiable {
     @Published var mode: TabMode = .agent
     /// Terminal visible de la pestaña, compartida con el asistente (sesión 0).
     let shell = TabShell()
+    private var directoryObserver: AnyCancellable?
     /// Trabajos de agentes externos (Claude Code, Codex…) lanzados desde esta pestaña.
     let externalAgents = ExternalAgents()
     @Published private(set) var messages: [ChatMessage] = []
@@ -102,6 +104,16 @@ final class ChatSession: ObservableObject, Identifiable {
         self.number = number
         self.title = title
         workspace = Workspace(directory: directory)
+        // La terminal y el asistente comparten carpeta: si haces cd en la terminal, el asistente trabaja ahí.
+        shell.onDirectoryChange = { [weak self] url in
+            guard let self, url.path != self.workspace.directory.path else { return }
+            self.workspace.move(to: url)
+        }
+        shell.onCommandFinished = { [weak self] in self?.workspace.refreshGit() }
+        // Y al revés: cambiar la carpeta del asistente (menú, change_directory) hace `cd` en la terminal si está libre.
+        directoryObserver = workspace.$directory.dropFirst().removeDuplicates().sink { [weak self] url in
+            self?.shell.changeDirectory(to: url)
+        }
     }
 
     /// Trabajando por su cuenta (no esperando al usuario): para el borde animado.

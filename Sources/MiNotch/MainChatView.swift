@@ -277,13 +277,7 @@ private struct ChatColumn: View {
             Rectangle().fill(separatorColor).frame(height: 1)
             if chat.mode == .terminal {
                 // La terminal no necesita API key: es un shell local.
-                TerminalHost(shell: chat.shell, directory: workspace.directory)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .padding(style.isNotch ? 6 : 8)
-                ShellStatusView(shell: chat.shell)
-                TerminalInputComposer(shell: chat.shell, directory: workspace.directory, fontSize: style.fontSize)
-                    .padding(.horizontal, style.isNotch ? 10 : 16)
-                    .padding(.vertical, 8)
+                TerminalPane(chat: chat, shell: chat.shell, blocks: chat.shell.blocks, workspace: workspace, style: style)
             } else if account.hasAPIKey {
                 transcript
             } else {

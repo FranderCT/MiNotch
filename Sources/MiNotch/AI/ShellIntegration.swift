@@ -88,18 +88,31 @@ final class ShellIntegration {
     static func hooks(token: String) -> String {
         // El token es un UUID generado por la app, nunca entrada del usuario.
         """
+        _minotch_b64() { builtin printf '%s' "$1" | command base64 | command tr -d '\\n' }
         _minotch_preexec() {
-            builtin printf '\\e]\(oscCode);\(token);start\\a'
+            # Comando y carpeta en base64: nunca interpretan nada del lado de la app.
+            builtin printf '\\e]\(oscCode);\(token);start;%s;%s\\a' "$(_minotch_b64 "$1")" "$(_minotch_b64 "$PWD")"
             return 0
         }
         _minotch_precmd() {
             local minotch_exit=$?
             builtin printf '\\e]\(oscCode);\(token);ready;%d\\a' "$minotch_exit"
+            builtin printf '\\e]\(oscCode);\(token);cwd;%s\\a' "$(_minotch_b64 "$PWD")"
+            return 0
+        }
+        # La app dibuja su propio prompt (carpeta, rama): el del shell se oculta. Va al final para ganarle a
+        # cualquier tema (powerlevel10k, oh-my-zsh…) que arme PROMPT en su precmd.
+        _minotch_prompt_off() {
+            PROMPT=''
+            RPROMPT=''
+            PROMPT_EOL_MARK=''
             return 0
         }
         typeset -ga preexec_functions precmd_functions
         preexec_functions=(_minotch_preexec ${preexec_functions:#_minotch_preexec})
-        precmd_functions=(_minotch_precmd ${precmd_functions:#_minotch_precmd})
+        precmd_functions=(_minotch_precmd ${precmd_functions:#(_minotch_precmd|_minotch_prompt_off)} _minotch_prompt_off)
+        unsetopt PROMPT_SP
+        _minotch_prompt_off
         """
     }
 

@@ -11,6 +11,19 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
     @Published private(set) var exitCode: Int32?
     @Published private(set) var commandState = ShellCommandState()
     @Published var draft = ""
+    /// Comandos terminados, cada uno con su salida (ver TerminalBlocks.swift).
+    let blocks = BlockStore()
+    /// El comando que corre ahora; nil con el prompt libre.
+    @Published private(set) var runningCommand: RunningCommand?
+    /// Carpeta actual del shell (la informa zsh en cada prompt).
+    @Published private(set) var currentDirectory: URL?
+    /// Un programa de pantalla completa (vim, less, htop…) tiene la terminal.
+    @Published private(set) var isAlternateScreen = false
+    /// Para ChatSession: seguir la carpeta del shell y actualizar git al terminar cada comando.
+    var onDirectoryChange: ((URL) -> Void)?
+    var onCommandFinished: (() -> Void)?
+    private var blockBaseRow = 0
+    private var sawFullScreen = false
     @Published private(set) var inputHistory: [String] = []
     @Published private(set) var isEditingDirectly = false
     @Published private(set) var inputError: String?
@@ -43,9 +56,19 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         environment["COLORTERM"] = "truecolor"
         environment["LANG"] = environment["LANG"] ?? "es_ES.UTF-8"
         commandState = ShellCommandState()
+        // Los bloques usan la misma paleta que la terminal viva; con historial para salidas largas.
+        view.installColors(ANSIPalette.swiftTermColors)
+        view.getTerminal().changeHistorySize(5_000)
         do {
             integration = try ShellIntegration(environment: &environment)
             let token = integration!.token
+            view.splitter = ShellStreamSplitter(token: token)
+            view.onSegment = { [weak self] segment in self?.handle(segment) }
+            view.onAlternateScreenChange = { [weak self] active in
+                guard let self else { return }
+                self.isAlternateScreen = active
+                if active { self.sawFullScreen = true }
+            }
             view.getTerminal().registerOscHandler(code: ShellIntegration.oscCode) { [weak self] bytes in
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -79,6 +102,81 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
         view.terminate()
         isRunning = false
         integration = nil
+    }
+
+    // MARK: - Bloques
+
+    private func handle(_ segment: ShellStreamSplitter.Segment) {
+        switch segment {
+        case .bytes:
+            break
+        case .commandStarted(let command, let directory):
+            // La terminal viva empieza vacía: todo lo que aparezca es salida de este comando.
+            clearLiveScreen()
+            blockBaseRow = BlockCapture.baseRow(of: view.getTerminal())
+            sawFullScreen = isAlternateScreen
+            let text = (command ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            runningCommand = RunningCommand(
+                command: text.isEmpty ? "(comando)" : text,
+                directory: directory.map { ($0 as NSString).abbreviatingWithTildeInPath },
+                startedAt: Date()
+            )
+            if !text.isEmpty, inputHistory.last != text {
+                inputHistory.removeAll { $0 == text }
+                inputHistory.append(text)
+                inputHistory = Array(inputHistory.suffix(100))
+            }
+        case .commandEnded(let code):
+            let captured = BlockCapture.capture(view.getTerminal(), baseRow: blockBaseRow)
+            if let running = runningCommand, code == 0, BlockStore.isClearCommand(running.command) {
+                // `clear` (si salió bien) limpia la lista de bloques, como limpiaría la pantalla en una terminal clásica.
+                blocks.clear()
+            } else if let running = runningCommand {
+                var block = TerminalBlock(command: running.command, directory: running.directory, startedAt: running.startedAt)
+                block.endedAt = Date()
+                block.exitCode = code
+                block.lines = captured.lines
+                block.plainOutput = captured.plainText
+                block.isTruncated = captured.isTruncated
+                block.usedFullScreen = sawFullScreen
+                blocks.append(block)
+            } else if !captured.lines.isEmpty {
+                // Lo que imprimió el arranque del shell (.zshrc…): visible por si hay un error ahí.
+                var block = TerminalBlock(command: "inicio del shell", directory: nil, startedAt: Date())
+                block.endedAt = Date()
+                block.lines = captured.lines
+                block.plainOutput = captured.plainText
+                blocks.append(block)
+            }
+            runningCommand = nil
+            sawFullScreen = false
+            clearLiveScreen()
+            onCommandFinished?()
+        case .directoryChanged(let path):
+            let url = URL(fileURLWithPath: path, isDirectory: true)
+            guard currentDirectory?.path != url.path else { return }
+            currentDirectory = url
+            onDirectoryChange?(url)
+        }
+    }
+
+    /// Borrar pantalla y historial (no toca los modos, como el pegado entre corchetes).
+    private func clearLiveScreen() {
+        view.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}[3J")
+    }
+
+    /// Cambiar de carpeta desde la interfaz (chip, menú, asistente): se hace con un `cd` real, que queda como bloque.
+    func changeDirectory(to url: URL) {
+        guard isRunning, commandState.phase == .ready, !isEditingDirectly, currentDirectory?.path != url.path else { return }
+        commandState.phase = .awaitingInput
+        Task { await write("cd \(InputPredictions.shellWord(url.path))\r", in: url) }
+    }
+
+    /// Repetir un comando de una línea desde un bloque; solo con el prompt libre.
+    func rerun(_ command: String, in directory: URL) {
+        guard isRunning, commandState.phase == .ready, !isEditingDirectly, !command.contains("\n") else { return }
+        commandState.phase = .awaitingInput
+        Task { await write(command + "\r", in: directory) }
     }
 
     // MARK: - Dónde se muestra
@@ -159,6 +257,10 @@ final class TabShell: NSObject, ObservableObject, LocalProcessTerminalViewDelega
 
     /// Lo que se ve: pantalla y el final del historial, sin líneas vacías al final.
     var screenText: String {
+        // Con el prompt libre, la terminal viva está limpia: lo último que pasó está en los bloques.
+        if runningCommand == nil, !blocks.blocks.isEmpty, commandState.phase == .ready {
+            return blocks.transcript(lastBlocks: 2)
+        }
         let text = String(decoding: view.getTerminal().getBufferAsData(), as: UTF8.self)
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeLast() }
@@ -235,9 +337,30 @@ final class ShellTerminalView: LocalProcessTerminalView {
     /// Para saber cuándo un comando terminó de responder.
     private(set) var lastOutputAt = Date.distantPast
 
+    /// Avisos de zsh (empieza/termina un comando): se cortan en su punto exacto del flujo.
+    var splitter: ShellStreamSplitter?
+    var onSegment: ((ShellStreamSplitter.Segment) -> Void)?
+    var onAlternateScreenChange: ((Bool) -> Void)?
+    private var wasAlternate = false
+
     override func dataReceived(slice: ArraySlice<UInt8>) {
         lastOutputAt = Date()
-        super.dataReceived(slice: slice)
+        guard splitter != nil else {
+            super.dataReceived(slice: slice)
+            return
+        }
+        for segment in splitter!.split(slice) {
+            if case .bytes(let bytes) = segment {
+                super.dataReceived(slice: bytes[...])
+                let alternate = getTerminal().isCurrentBufferAlternate
+                if alternate != wasAlternate {
+                    wasAlternate = alternate
+                    onAlternateScreenChange?(alternate)
+                }
+            } else {
+                onSegment?(segment)
+            }
+        }
     }
 
     /// El panel del notch toma el teclado solo si la vista clicada lo pide (como un campo de texto).
